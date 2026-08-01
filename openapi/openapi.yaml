@@ -1,0 +1,410 @@
+openapi: 3.1.0
+info:
+  title: Landslide Inspection Priority API
+  version: 1.0.0
+  description: |
+    地灾巡查优先级服务。管理隐患点（HazardPoint）、不可变证据快照
+    （EvidenceSnapshot）和版本化评分策略（StrategyVersion），提供优先级
+    计算、队列检索与解释 API。
+
+    核心不变量：
+    * 分项名称与得分范围锁定：`rainfall_24h` 0-40、`historical_events`
+      0-30、`inspection_recency` 0-30，总分 = 分项之和（严格相等）。
+    * 道路不可达只影响 `scheduling_status`（`blocked`），风险等级保持不变。
+    * 证据快照不可变（数据库触发器强制），`captured_at` 创建后锁定。
+    * 已发布策略的生效区间互不重叠（排他约束）；任意快照时刻恰好对应
+      唯一策略版本，历史快照可确定性重放。
+    * 队列按 `(total_score DESC, id ASC)` 键集分页，持续写入下同分不跳页。
+servers:
+  - url: http://localhost:3000
+tags:
+  - name: hazard-points
+  - name: evidence-snapshots
+  - name: strategy-versions
+  - name: priorities
+  - name: inspection-queue
+
+paths:
+  /api/v1/hazard_points:
+    get:
+      tags: [hazard-points]
+      summary: 列出隐患点
+      responses:
+        "200":
+          description: 隐患点列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HazardPoint" }
+    post:
+      tags: [hazard-points]
+      summary: 登记隐患点
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hazard_point]
+              properties:
+                hazard_point:
+                  type: object
+                  required: [external_code, name, kind]
+                  properties:
+                    external_code: { type: string, example: SLP-001 }
+                    name: { type: string, example: 切坡建房点 }
+                    kind: { type: string, example: cut_slope_building }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /api/v1/hazard_points/{hazard_point_id}/evidence_snapshots:
+    post:
+      tags: [evidence-snapshots]
+      summary: 为隐患点采集一份不可变证据快照
+      description: 快照一旦创建不可修改、不可删除；`captured_at` 即锁定的快照时间。
+      parameters:
+        - { $ref: "#/components/parameters/HazardPointId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [evidence_snapshot]
+              properties:
+                evidence_snapshot:
+                  type: object
+                  required: [rainfall_24h_mm, historical_event_count, road_accessible, captured_at]
+                  properties:
+                    rainfall_24h_mm: { type: number, example: 186 }
+                    historical_event_count: { type: integer, example: 2 }
+                    last_inspected_at: { type: string, format: date-time, nullable: true }
+                    road_accessible: { type: boolean, example: true }
+                    captured_at: { type: string, format: date-time }
+                    note: { type: string }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /api/v1/strategy_versions:
+    get:
+      tags: [strategy-versions]
+      summary: 列出评分策略版本
+      responses:
+        "200":
+          description: 策略版本列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/StrategyVersion" }
+    post:
+      tags: [strategy-versions]
+      summary: 创建策略版本（可选立即发布）
+      description: |
+        `rules` 必须与锁定分项模式一致：不得新增/重命名分项，任一分项的
+        可达得分不得超过其锁定上限，否则 422。`publish=true` 时立即发布；
+        若生效区间与任何已发布版本重叠，返回 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy_version]
+              properties:
+                publish: { type: boolean, default: false }
+                strategy_version:
+                  type: object
+                  required: [version, effective_from, rules]
+                  properties:
+                    version: { type: integer, example: 2 }
+                    effective_from: { type: string, format: date-time }
+                    effective_to: { type: string, format: date-time, nullable: true }
+                    rules: { $ref: "#/components/schemas/Rules" }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StrategyVersion" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /api/v1/strategy_versions/{id}/publish:
+    post:
+      tags: [strategy-versions]
+      summary: 发布策略版本
+      description: 与已发布区间重叠时返回 409，同一生效时刻的两个候选恰好一个成功。
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: 已发布
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StrategyVersion" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/strategy_versions/{id}/retire:
+    post:
+      tags: [strategy-versions]
+      summary: 退役策略版本
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: 已退役
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StrategyVersion" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/priorities:
+    post:
+      tags: [priorities]
+      summary: 计算（或重放）某证据快照的优先级
+      description: |
+        省略 `strategy_version_id` 时，按快照 `captured_at` 解析唯一生效的
+        已发布版本——对历史快照的重放因此逐字节复现昨天的判断；显式传入
+        版本号则做对比重放。同一 (snapshot, strategy) 幂等：并发计算只产生
+        一条记录。响应同时包含分项得分、锁定范围、规则版本与快照时间。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [priority]
+              properties:
+                priority:
+                  type: object
+                  required: [evidence_snapshot_id]
+                  properties:
+                    evidence_snapshot_id: { type: integer }
+                    strategy_version_id: { type: integer, nullable: true }
+      responses:
+        "201":
+          description: 优先级解释
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Explanation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: 快照时刻无生效策略
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/priorities/{id}/explanation:
+    get:
+      tags: [priorities]
+      summary: 获取某条评分记录的解释
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: 解释（分项之和严格等于总分）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Explanation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/inspection_queue:
+    get:
+      tags: [inspection-queue]
+      summary: 检索巡查队列（键集分页）
+      description: |
+        每个隐患点以其当前评分出现一次，按 `(total_score DESC, id ASC)`
+        排序。`cursor` 为上一页返回的 `next_cursor`；持续写入下同分记录
+        不会在已翻过的页之间来回跳动。阻塞点位保留原始风险等级并标记
+        `scheduling_status=blocked`。
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 500 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: scheduling_status
+          in: query
+          schema: { type: string, enum: [schedulable, blocked] }
+      responses:
+        "200":
+          description: 一页队列条目
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/QueueEntry" }
+                  next_cursor: { type: string, nullable: true }
+        "400":
+          description: 无效游标
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    HazardPointId:
+      name: hazard_point_id
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: 参数或规则校验失败
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: 生效区间与已发布策略重叠
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    HazardPoint:
+      type: object
+      properties:
+        id: { type: integer }
+        external_code: { type: string }
+        name: { type: string }
+        kind: { type: string }
+
+    EvidenceSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        hazard_point_id: { type: integer }
+        rainfall_24h_mm: { type: string, example: "186.0" }
+        historical_event_count: { type: integer }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+        road_accessible: { type: boolean }
+        captured_at: { type: string, format: date-time }
+        note: { type: string, nullable: true }
+
+    Rules:
+      type: object
+      required: [rainfall_24h, historical_events, inspection_recency, risk_levels]
+      properties:
+        rainfall_24h:
+          type: object
+          properties:
+            thresholds:
+              type: array
+              items:
+                type: object
+                properties:
+                  gte_mm: { type: number }
+                  score: { type: integer, minimum: 0, maximum: 40 }
+        historical_events:
+          type: object
+          properties:
+            per_event: { type: integer }
+            cap_events: { type: integer }
+        inspection_recency:
+          type: object
+          properties:
+            never: { type: integer, minimum: 0, maximum: 30 }
+            fresh: { type: integer, minimum: 0, maximum: 30 }
+            stale_days:
+              type: array
+              items:
+                type: object
+                properties:
+                  gte_days: { type: integer }
+                  score: { type: integer, minimum: 0, maximum: 30 }
+        risk_levels:
+          type: array
+          items:
+            type: object
+            properties:
+              min_total: { type: integer }
+              level: { type: string, enum: [high, medium, low] }
+
+    StrategyVersion:
+      type: object
+      properties:
+        id: { type: integer }
+        version: { type: integer }
+        status: { type: string, enum: [draft, published, retired] }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        published_at: { type: string, format: date-time, nullable: true }
+        rules: { $ref: "#/components/schemas/Rules" }
+
+    Component:
+      type: object
+      properties:
+        name: { type: string, enum: [rainfall_24h, historical_events, inspection_recency] }
+        score: { type: integer }
+        range:
+          type: object
+          properties:
+            min: { type: integer, const: 0 }
+            max: { type: integer, enum: [40, 30] }
+
+    Explanation:
+      type: object
+      description: components 各项 score 之和严格等于 total_score。
+      properties:
+        score_record_id: { type: integer }
+        hazard_point_id: { type: integer }
+        evidence_snapshot_id: { type: integer }
+        snapshot_captured_at: { type: string, format: date-time }
+        strategy_version: { type: integer }
+        strategy_effective_from: { type: string, format: date-time }
+        total_score: { type: integer, minimum: 0, maximum: 100 }
+        risk_level: { type: string, enum: [high, medium, low] }
+        scheduling_status: { type: string, enum: [schedulable, blocked] }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/Component" }
+        components_sum: { type: integer }
+
+    QueueEntry:
+      type: object
+      properties:
+        score_record_id: { type: integer }
+        hazard_point: { $ref: "#/components/schemas/HazardPoint" }
+        evidence_snapshot_id: { type: integer }
+        snapshot_captured_at: { type: string, format: date-time }
+        strategy_version: { type: integer }
+        total_score: { type: integer }
+        risk_level: { type: string, enum: [high, medium, low] }
+        scheduling_status: { type: string, enum: [schedulable, blocked] }
+        components:
+          type: object
+          additionalProperties: { type: integer }
+        computed_at: { type: string, format: date-time }
