@@ -2,7 +2,7 @@ require "test_helper"
 
 class Scoring::MaterializerTest < ActiveSupport::TestCase
   setup do
-    @policy = create_policy!(version: "mat-v1", effective_at: Time.utc(2026, 7, 1))
+    @policy = create_policy!(version: "mat-v1", effective_from: Time.utc(2026, 7, 1))
   end
 
   test "materialises an explainable score whose components sum to total" do
@@ -51,9 +51,11 @@ class Scoring::MaterializerTest < ActiveSupport::TestCase
 
     first = Scoring::Materializer.new(snap).call(policy: @policy).priority_score.total_score
 
-    # A later policy exists, but replaying against the pinned old version must
-    # reproduce the original numbers exactly.
-    create_policy!(version: "mat-v2", effective_at: Time.utc(2026, 8, 1),
+    # Bound v1 and publish a successor from the boundary. v1 stays published, so
+    # replaying the old snapshot against the pinned v1 reproduces the original
+    # numbers exactly, even though a radically different v2 now exists.
+    @policy.bound!(Time.utc(2026, 8, 1))
+    create_policy!(version: "mat-v2", effective_from: Time.utc(2026, 8, 1),
                    definition: build_baseline_definition.merge(
                      "rainfall" => { "thresholds" => [[0, 40]] } # radically different
                    ))
@@ -65,7 +67,7 @@ end
 
 class Scoring::QueueTest < ActiveSupport::TestCase
   setup do
-    @policy = create_policy!(version: "queue-v1", effective_at: Time.utc(2026, 7, 1))
+    @policy = create_policy!(version: "queue-v1", effective_from: Time.utc(2026, 7, 1))
   end
 
   # Bulk-create real hazard points + snapshots (to satisfy FKs), then attach a
@@ -168,10 +170,12 @@ class Scoring::QueueTest < ActiveSupport::TestCase
 end
 
 class Scoring::ConcurrentPublishTest < ActiveSupport::TestCase
-  test "two candidates racing to publish at the same instant yield one winner" do
-    at = Time.utc(2026, 7, 15, 9, 0, 0)
-    a = create_policy!(version: "race-a", effective_at: at, publish: false)
-    b = create_policy!(version: "race-b", effective_at: at, publish: false)
+  test "two candidates racing to publish overlapping intervals yield one winner" do
+    from = Time.utc(2026, 7, 15, 9, 0, 0)
+    # Both candidates claim the same open-ended window, so at most one can be
+    # published; the interval-overlap exclusion constraint rejects the other.
+    a = create_policy!(version: "race-a", effective_from: from, publish: false)
+    b = create_policy!(version: "race-b", effective_from: from, publish: false)
 
     results = Queue.new # thread-safe collector
     [a, b].map do |policy|
@@ -186,7 +190,7 @@ class Scoring::ConcurrentPublishTest < ActiveSupport::TestCase
     end.each(&:join)
 
     outcomes = Array.new(results.size) { results.pop }
-    assert_equal 1, ScoringPolicy.published.where(effective_at: at).count
+    assert_equal 1, ScoringPolicy.published.count
     assert_includes outcomes, :rejected
   end
 end

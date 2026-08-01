@@ -1,10 +1,14 @@
 module Scoring
   # Computes a priority score for a snapshot and persists it idempotently.
   #
-  # Concurrency contract: two workers scoring the same (snapshot, policy) race
-  # onto the unique index index_priority_scores_on_snapshot_and_policy. We use
-  # an upsert so the loser of the race updates the same row instead of raising —
-  # both observers end up seeing one identical, converged record.
+  # Concurrency contract (two levels):
+  #   * (snapshot, policy) idempotency: workers scoring the same pair race onto
+  #     index_priority_scores_on_snapshot_and_policy; an upsert makes the loser
+  #     update the same row, so both observers see one converged record.
+  #   * one "current" score per hazard point: we take a row lock on the hazard
+  #     point before transitioning the current flag, so concurrent computes are
+  #     serialised and exactly one row ends up current (backed by the partial
+  #     unique index index_priority_scores_one_current_per_point).
   #
   # This service orchestrates persistence only. Every number it stores comes
   # from Scoring::Engine; it applies no scoring rules of its own.
@@ -15,9 +19,13 @@ module Scoring
       @snapshot = snapshot
     end
 
-    # Resolve the authoritative policy for the snapshot's frozen instant unless
-    # one is supplied (replay of a specific version).
-    def call(policy: nil)
+    # policy:       resolve the authoritative policy for the snapshot's frozen
+    #               instant unless one is supplied (replay of a specific version).
+    # make_current: :auto (default) marks this score current only when its
+    #               snapshot is the latest evidence for the hazard point, so an
+    #               audit replay of an older snapshot never steals current.
+    #               true forces current; false never sets current.
+    def call(policy: nil, make_current: :auto)
       policy ||= ScoringPolicy.authoritative_for(@snapshot.captured_at)
       raise NoAuthoritativePolicyError.new(@snapshot.captured_at) if policy.nil?
 
@@ -27,11 +35,44 @@ module Scoring
         policy_version: policy.version
       )
 
-      record = upsert(policy, result)
+      record = nil
+      ActiveRecord::Base.transaction do
+        # Serialise current-flag transitions per hazard point.
+        HazardPoint.lock.find(@snapshot.hazard_point_id)
+        record = upsert(policy, result)
+        apply_current_flag(record, make_current)
+        record.reload
+      end
       Outcome.new(priority_score: record, result: result, policy: policy)
     end
 
     private
+
+    def apply_current_flag(record, make_current)
+      should = case make_current
+               when true then true
+               when false then false
+               else latest_snapshot_for_point?
+               end
+      return unless should
+
+      # Demote any existing current row for this point, then promote this one.
+      # Both run inside the per-point row lock, so the partial unique index is
+      # never violated and exactly one row remains current.
+      PriorityScore.where(hazard_point_id: record.hazard_point_id, current: true)
+                   .where.not(id: record.id)
+                   .update_all(current: false)
+      record.update_columns(current: true) unless record.current
+    end
+
+    def latest_snapshot_for_point?
+      latest_id = EvidenceSnapshot
+        .where(hazard_point_id: @snapshot.hazard_point_id)
+        .order(captured_at: :desc, id: :desc)
+        .limit(1)
+        .pick(:id)
+      latest_id == @snapshot.id
+    end
 
     def upsert(policy, result)
       attrs = {
@@ -50,6 +91,8 @@ module Scoring
       }
 
       # Rails manages created_at/updated_at for the upsert (record_timestamps).
+      # current is intentionally left out of update_only so a re-score never
+      # clobbers the flag; apply_current_flag owns that transition.
       PriorityScore.upsert(
         attrs,
         unique_by: :index_priority_scores_on_snapshot_and_policy,

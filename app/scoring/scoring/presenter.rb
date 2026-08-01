@@ -26,6 +26,7 @@ module Scoring
         },
         evidence_snapshot: {
           id: priority_score.evidence_snapshot_id,
+          business_key: priority_score.evidence_snapshot.business_key,
           captured_at: priority_score.evidence_captured_at.utc.iso8601,
           rainfall_mm_24h: priority_score.evidence_snapshot.rainfall_mm_24h.to_s("F"),
           historical_event_count: priority_score.evidence_snapshot.historical_event_count,
@@ -34,14 +35,17 @@ module Scoring
         },
         scoring_policy: {
           id: priority_score.scoring_policy_id,
-          version: priority_score.policy_version
+          version: priority_score.policy_version,
+          effective_from: priority_score.scoring_policy.effective_from.utc.iso8601,
+          effective_until: priority_score.scoring_policy.effective_until&.utc&.iso8601
         },
         components: components,
         total_score: priority_score.total_score,
         components_sum: component_total,
         risk_level: priority_score.risk_level,
         scheduling_status: priority_score.scheduling_status,
-        road_blocked: priority_score.blocked?
+        road_blocked: priority_score.blocked?,
+        current: priority_score.current
       }
     end
 
@@ -53,7 +57,8 @@ module Scoring
         risk_level: priority_score.risk_level,
         scheduling_status: priority_score.scheduling_status,
         policy_version: priority_score.policy_version,
-        evidence_snapshot_id: priority_score.evidence_snapshot_id
+        evidence_snapshot_id: priority_score.evidence_snapshot_id,
+        current: priority_score.current
       }
     end
 

@@ -32,6 +32,44 @@ class EvidenceSnapshot < ApplicationRecord
     road_accessible
   end
 
+  # Idempotent capture keyed by an optional caller-supplied business_key:
+  #   * no business_key                 -> always creates a new snapshot
+  #   * business_key, first time        -> creates the snapshot
+  #   * business_key, same payload      -> returns the existing snapshot (idempotent)
+  #   * business_key, different payload -> raises ConflictingBusinessKeyError
+  # Payload equivalence is decided by the content_digest of the frozen facts, so
+  # the check is exact and immune to attribute ordering.
+  def self.capture!(hazard_point:, business_key: nil, **facts)
+    incoming = new(hazard_point: hazard_point, business_key: business_key, **facts)
+
+    if business_key.blank?
+      incoming.save!
+      return incoming
+    end
+
+    existing = find_by(business_key: business_key)
+    if existing
+      # Recompute the incoming digest to compare payloads without persisting.
+      incoming.send(:assign_content_digest)
+      return existing if existing.content_digest == incoming.content_digest
+
+      raise Scoring::ConflictingBusinessKeyError.new(business_key)
+    end
+
+    # Insert inside a savepoint so a lost unique-key race only rolls back this
+    # statement, leaving any surrounding transaction usable for the re-resolve.
+    begin
+      transaction(requires_new: true) { incoming.save! }
+      incoming
+    rescue ActiveRecord::RecordNotUnique
+      winner = find_by!(business_key: business_key)
+      incoming.send(:assign_content_digest)
+      return winner if winner.content_digest == incoming.content_digest
+
+      raise Scoring::ConflictingBusinessKeyError.new(business_key)
+    end
+  end
+
   # Deterministic fingerprint of the frozen facts. Recomputable during tests to
   # prove the stored snapshot was never altered.
   def self.digest_for(attrs)

@@ -19,10 +19,11 @@ module ActiveSupport
       }
     end
 
-    def create_policy!(version:, effective_at:, definition: nil, publish: true)
+    def create_policy!(version:, effective_from:, effective_until: nil, definition: nil, publish: true)
       policy = ScoringPolicy.create!(
         version: version,
-        effective_at: effective_at,
+        effective_from: effective_from,
+        effective_until: effective_until,
         definition: definition || build_baseline_definition
       )
       policy.publish! if publish

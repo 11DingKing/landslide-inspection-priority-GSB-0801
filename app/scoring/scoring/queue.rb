@@ -25,7 +25,7 @@ module Scoring
     end
 
     # cursor: opaque "<total_score>:<hazard_point_id>" from a prior page.
-    def page(limit: DEFAULT_LIMIT, cursor: nil, scheduling_status: nil)
+    def page(limit: DEFAULT_LIMIT, cursor: nil, scheduling_status: nil, current: nil)
       # Blank/absent limit falls back to the default rather than clamping to 1.
       limit = limit.presence ? limit.to_i.clamp(1, MAX_LIMIT) : DEFAULT_LIMIT
 
@@ -33,6 +33,7 @@ module Scoring
         .where(scoring_policy_id: @policy.id)
         .queue_ordered
       relation = relation.where(scheduling_status: scheduling_status) if scheduling_status.present?
+      relation = relation.where(current: true) if ActiveModel::Type::Boolean.new.cast(current)
       relation = apply_cursor(relation, cursor)
 
       records = relation.limit(limit + 1).to_a

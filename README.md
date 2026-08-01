@@ -20,9 +20,9 @@ Built with **Ruby 3.4**, **Rails 8 (API mode)** and **PostgreSQL**.
 | Model | Purpose | Key guarantees |
 |-------|---------|----------------|
 | `HazardPoint` | A monitored hazard location. | Locked category vocabulary (`cut_slope_housing`, `road_slope`, `registered_hazard`). |
-| `EvidenceSnapshot` | An **immutable** record of the facts at one instant (`captured_at`). | Cannot be updated or destroyed; a SHA-256 `content_digest` fingerprints the frozen facts. |
-| `ScoringPolicy` | A **versioned**, declarative rule set (`definition` JSONB). | At most one *published* policy per `effective_at` instant (DB partial-unique index). |
-| `PriorityScore` | The materialised, explainable result of scoring one snapshot with one policy. | DB check constraints enforce component ranges **and** `total = sum(components)`. |
+| `EvidenceSnapshot` | An **immutable** record of the facts at one instant (`captured_at`). | Cannot be updated or destroyed; a SHA-256 `content_digest` fingerprints the frozen facts. An optional `business_key` makes capture idempotent. |
+| `ScoringPolicy` | A **versioned**, declarative rule set (`definition` JSONB) valid over a half-open interval `[effective_from, effective_until)`. | Published intervals may never overlap (DB GiST exclusion constraint). A policy can be *bounded* rather than retired. |
+| `PriorityScore` | The materialised, explainable result of scoring one snapshot with one policy. | DB check constraints enforce component ranges **and** `total = sum(components)`. At most one `current` score per hazard point (partial-unique index). |
 
 ### Locked scoring contract
 
@@ -54,7 +54,11 @@ errors to HTTP. This is what makes historical replay and policy versioning safe.
 
 | Requirement | How it is met |
 |-------------|---------------|
-| **Reject overlapping policies / pick one deterministic version** | A partial-unique index on `effective_at WHERE status='published'` makes the database reject a second concurrent publish at the same instant (→ HTTP `409`). Selection rule: the published policy with the greatest `effective_at ≤ captured_at` — a single, deterministic winner. |
+| **Reject overlapping policies / pick one deterministic version** | Policies carry a half-open interval `[effective_from, effective_until)`. A GiST **exclusion constraint** on `tsrange(...)` `WHERE status='published'` makes the database reject any publish/bound whose interval overlaps an existing published one (→ HTTP `409`). Selection rule: the published policy whose interval contains `captured_at` — a single, deterministic winner. |
+| **Adjust a policy's coverage without breaking replay** | `bound!` sets `effective_until` on a still-**published** policy instead of retiring it. Snapshots captured before the boundary keep resolving to it, so their scores stay reproducible; a successor takes over from the boundary onward. |
+| **Old snapshot binds v1, new snapshot binds v2** | Each snapshot resolves to the policy whose interval contains its immutable `captured_at`. With v1 `[…, boundary)` and v2 `[boundary, …)`, a pre-boundary snapshot binds v1 and a boundary/after snapshot binds v2 — automatically. |
+| **Business-key idempotency / conflict** | `EvidenceSnapshot.capture!` compares the `content_digest` of the frozen payload against any existing row for the `business_key`: identical payload returns the same snapshot (idempotent), divergent payload raises a `409` conflict. A unique index + savepoint insert keeps this correct under concurrency. |
+| **Exactly one `current` score per point; concurrent compute leaves one** | The materializer takes a per-hazard-point row lock, then flips the `current` flag; a partial-unique index (`WHERE current`) guarantees a single current row. `current` follows the **latest** snapshot, so replaying an older snapshot never steals it. |
 | **Concurrent compute of the same snapshot** | `PriorityScore` has a unique index on `(evidence_snapshot_id, scoring_policy_id)`; the materializer `upsert`s onto it, so racing workers converge to one identical row. |
 | **Replay old snapshots** | Snapshots are immutable; the materializer accepts an explicit `policy:` so any historical version can be re-run to reproduce the original numbers byte-for-byte. |
 | **Explanation sum == total, strictly** | Integer components + a DB check constraint `total = rainfall+history+recency+exposure`; the presenter re-asserts the sum at serialization time. |
@@ -100,17 +104,27 @@ bin/rails db:migrate     # apply migrations
 bin/rails db:seed        # load the 3 scenario points + baseline policy
 ```
 
-The seed prints the resulting queue, e.g.:
+The seed prints the resulting policies and scores, e.g.:
 
 ```
-Seeded 3 hazard points, policy 2026.08.01-baseline.
-  HZ-CUTSLOPE-001      total= 93 risk=extreme  scheduling=schedulable
-  HZ-ROADSLOPE-002     total= 50 risk=moderate scheduling=blocked
-  HZ-REGISTERED-003    total= 33 risk=low      scheduling=schedulable
+Policies: 2026.v1 [2026-01-01T00:00:00Z, 2026-08-02T00:00:00Z), 2026.v2 [2026-08-02T00:00:00Z, ∞)
+Priority scores (current marked with *):
+  * HZ-CUTSLOPE-001    v=2026.v1  total= 93 risk=extreme  scheduling=schedulable
+  * RDS-002            v=2026.v2  total= 70 risk=high     scheduling=blocked
+  * HZ-REGISTERED-003  v=2026.v1  total= 33 risk=low      scheduling=schedulable
+    RDS-002            v=2026.v1  total= 50 risk=moderate scheduling=blocked
 ```
 
-Note `HZ-ROADSLOPE-002`: the road is closed, so it is `blocked` for scheduling,
-yet its risk stays `moderate` (total 50) — **not** zeroed.
+The seed demonstrates the interval evolution:
+
+- **Policy v1** covers `[2026-01-01, 2026-08-02)`; **v2** takes over from the
+  boundary. v1 is *bounded*, not retired, so it still scores its old snapshots.
+- **`RDS-002`** has two scores: its pre-boundary snapshot still binds **v1**
+  (total 50, replayable), while the boundary snapshot — captured with
+  `business_key = evidence-rds-002-20260802-0000`, 210 mm, road still closed —
+  binds **v2** (total 70) and is the **current** score.
+- The road is closed on both `RDS-002` snapshots, so they are `blocked` for
+  scheduling, yet risk stays `moderate`/`high` — **never** zeroed.
 
 ## Run the tests
 
@@ -119,10 +133,13 @@ bin/rails test
 ```
 
 The suite covers every invariant called out above: the exact sum, the locked
-component ranges, immutability, deterministic policy selection, overlap
-rejection (including a concurrent-publish race), idempotent concurrent compute,
-historical replay, a ≥10k-point ordering pass, and stable pagination under
-continuous equal-score writes.
+component ranges, immutability, interval-based policy selection, overlap
+rejection (including a concurrent-publish race), bounding a policy without
+breaking replay, business-key idempotency vs. conflict (including a concurrent
+capture race), one-current-per-point under concurrent compute, `current`
+following the latest snapshot, idempotent concurrent compute, historical replay,
+a ≥10k-point ordering pass, and stable pagination under continuous equal-score
+writes.
 
 ## Start the server
 
@@ -142,13 +159,14 @@ Base path: `/api/v1`. Full contract in [`docs/openapi.yaml`](docs/openapi.yaml).
 |---------------|---------|
 | `GET/POST /hazard_points` | List / create hazard points |
 | `GET /hazard_points/:id` | Show a hazard point |
-| `GET/POST /hazard_points/:id/evidence_snapshots` | List / capture snapshots (create only — immutable) |
+| `GET/POST /hazard_points/:id/evidence_snapshots` | List / capture snapshots (create only — immutable; `business_key` idempotent, 409 on payload conflict) |
 | `GET /evidence_snapshots/:id` | Show a snapshot |
 | `POST /evidence_snapshots/:id/priority` | **Compute** a score (optionally `?scoring_policy_id=` to replay a version) |
-| `GET/POST /scoring_policies` | List / create (draft) policies |
-| `POST /scoring_policies/:id/publish` | **Publish** (409 on overlapping `effective_at`) |
-| `GET /scoring_policies/:id/queue` | **Queue**: stable, keyset-paginated ranking (`?limit=&cursor=&scheduling_status=`) |
-| `GET /priority_scores/:id/explanation` | **Explain**: per-component breakdown + policy version |
+| `GET/POST /scoring_policies` | List / create (draft) policies with `effective_from` / `effective_until` |
+| `POST /scoring_policies/:id/publish` | **Publish** (409 on overlapping interval) |
+| `PATCH /scoring_policies/:id/bound` | **Bound** a published policy's `effective_until` without retiring it |
+| `GET /scoring_policies/:id/queue` | **Queue**: stable, keyset-paginated ranking (`?limit=&cursor=&scheduling_status=&current=`) |
+| `GET /priority_scores/:id/explanation` | **Explain**: per-component breakdown + policy version/interval + `current` |
 
 ### Example: compute and explain
 
@@ -159,19 +177,25 @@ curl -X POST http://localhost:3000/api/v1/evidence_snapshots/2/priority
 
 ```jsonc
 {
-  "hazard_point": { "code": "HZ-ROADSLOPE-002", "category": "road_slope" },
-  "scoring_policy": { "version": "2026.08.01-baseline" },
+  "hazard_point": { "code": "RDS-002", "category": "road_slope" },
+  "evidence_snapshot": { "business_key": "evidence-rds-002-20260802-0000" },
+  "scoring_policy": {
+    "version": "2026.v2",
+    "effective_from": "2026-08-02T00:00:00Z",
+    "effective_until": null
+  },
   "components": [
-    { "name": "rainfall", "score": 22, "max": 40 },
+    { "name": "rainfall", "score": 40, "max": 40 },
     { "name": "history",  "score": 0,  "max": 25 },
     { "name": "recency",  "score": 18, "max": 20 },
-    { "name": "exposure", "score": 10, "max": 15 }
+    { "name": "exposure", "score": 12, "max": 15 }
   ],
-  "total_score": 50,
-  "components_sum": 50,          // strictly equal to total_score
-  "risk_level": "moderate",
+  "total_score": 70,
+  "components_sum": 70,          // strictly equal to total_score
+  "risk_level": "high",
   "scheduling_status": "blocked", // road closed -> scheduling only
-  "road_blocked": true
+  "road_blocked": true,
+  "current": true                 // authoritative score for this point
 }
 ```
 

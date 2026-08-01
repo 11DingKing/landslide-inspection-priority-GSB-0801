@@ -10,11 +10,12 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_01_000004) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_01_000006) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
   create_table "evidence_snapshots", force: :cascade do |t|
+    t.string "business_key"
     t.datetime "captured_at", null: false
     t.string "content_digest", null: false
     t.datetime "created_at", null: false
@@ -24,6 +25,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000004) do
     t.decimal "rainfall_mm_24h", precision: 8, scale: 2, default: "0.0", null: false
     t.boolean "road_accessible", default: true, null: false
     t.datetime "updated_at", null: false
+    t.index ["business_key"], name: "index_evidence_snapshots_on_business_key", unique: true
     t.index ["content_digest"], name: "index_evidence_snapshots_on_content_digest"
     t.index ["hazard_point_id", "captured_at"], name: "index_evidence_snapshots_on_hazard_point_id_and_captured_at"
     t.index ["hazard_point_id"], name: "index_evidence_snapshots_on_hazard_point_id"
@@ -44,6 +46,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000004) do
 
   create_table "priority_scores", force: :cascade do |t|
     t.datetime "created_at", null: false
+    t.boolean "current", default: false, null: false
     t.datetime "evidence_captured_at", null: false
     t.bigint "evidence_snapshot_id", null: false
     t.integer "exposure_score", null: false
@@ -60,6 +63,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000004) do
     t.index ["evidence_snapshot_id", "scoring_policy_id"], name: "index_priority_scores_on_snapshot_and_policy", unique: true
     t.index ["evidence_snapshot_id"], name: "index_priority_scores_on_evidence_snapshot_id"
     t.index ["hazard_point_id"], name: "index_priority_scores_on_hazard_point_id"
+    t.index ["hazard_point_id"], name: "index_priority_scores_one_current_per_point", unique: true, where: "current"
     t.index ["scoring_policy_id"], name: "index_priority_scores_on_scoring_policy_id"
     t.index ["total_score", "id"], name: "index_priority_scores_on_total_and_id", order: { total_score: :desc }
     t.check_constraint "exposure_score >= 0 AND exposure_score <= 15", name: "priority_scores_exposure_range"
@@ -74,15 +78,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000004) do
   create_table "scoring_policies", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.jsonb "definition", default: {}, null: false
-    t.datetime "effective_at", null: false
+    t.datetime "effective_from", null: false
+    t.datetime "effective_until"
     t.datetime "published_at"
     t.string "status", default: "draft", null: false
     t.datetime "updated_at", null: false
     t.string "version", null: false
-    t.index ["effective_at"], name: "index_published_policies_on_effective_at", unique: true, where: "((status)::text = 'published'::text)"
     t.index ["status"], name: "index_scoring_policies_on_status"
     t.index ["version"], name: "index_scoring_policies_on_version", unique: true
+    t.check_constraint "effective_until IS NULL OR effective_until > effective_from", name: "scoring_policies_interval_order_check"
     t.check_constraint "status::text = ANY (ARRAY['draft'::character varying, 'published'::character varying, 'archived'::character varying]::text[])", name: "scoring_policies_status_check"
+    t.exclusion_constraint "tsrange(effective_from, effective_until) WITH &&", where: "(status)::text = 'published'::text", using: :gist, name: "scoring_policies_no_overlapping_published"
   end
 
   add_foreign_key "evidence_snapshots", "hazard_points"

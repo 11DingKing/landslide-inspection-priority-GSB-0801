@@ -14,9 +14,16 @@ info:
       * total_score is the exact integer sum of the four components (0..100).
       * An impassable road sets scheduling_status="blocked" ONLY; it never
         lowers total_score or risk_level.
-      * At most one published policy may claim any effective_at instant, so a
-        snapshot always resolves to a single authoritative policy version.
-      * Evidence snapshots are immutable and can be replayed by any policy.
+      * Policies are valid over a half-open interval [effective_from,
+        effective_until). Published intervals may never overlap (DB GiST
+        exclusion constraint), so a snapshot resolves to a single authoritative
+        version. A policy can be BOUNDED (given an end) rather than retired, so
+        earlier snapshots still resolve to it and remain replayable.
+      * Evidence snapshots are immutable and can be replayed by any policy. An
+        optional business_key makes capture idempotent for an identical payload
+        and a conflict (409) for a divergent payload.
+      * At most one priority score per hazard point is `current`; concurrent
+        computation converges to a single current row.
 servers:
   - url: http://localhost:3000
 paths:
@@ -89,10 +96,18 @@ paths:
                   $ref: "#/components/schemas/EvidenceSnapshotInput"
       responses:
         "201":
-          description: Created (immutable; no update/delete endpoints exist)
+          description: |
+            Created, or the existing snapshot when the same business_key is
+            re-submitted with an identical payload (idempotent). Snapshots are
+            immutable; no update/delete endpoints exist.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "409":
+          description: business_key already exists with a different payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BusinessKeyError" }
         "422": { $ref: "#/components/responses/Unprocessable" }
   /api/v1/evidence_snapshots/{id}:
     get:
@@ -178,10 +193,11 @@ paths:
     post:
       summary: Publish a scoring policy
       description: |
-        Publishing enforces the overlap rule at the database level: if another
-        published policy already claims the same effective_at instant, this
+        Publishing enforces the interval-overlap rule at the database level (a
+        GiST exclusion constraint): if the policy's [effective_from,
+        effective_until) window overlaps an already-published policy, this
         returns 409 overlapping_policy. This is how concurrent publication of two
-        candidates at the same effective moment is rejected, leaving a single
+        candidates over the same window is rejected, leaving a single
         authoritative version.
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
@@ -192,7 +208,42 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ScoringPolicy" }
         "409":
-          description: Overlapping published policy at this effective_at
+          description: Overlapping published policy interval
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverlapError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/scoring_policies/{id}/bound:
+    patch:
+      summary: Bound a published policy's interval (set effective_until)
+      description: |
+        Closes an already-published policy's validity interval at a boundary
+        WITHOUT retiring it. The policy stays published and still scores /
+        reproduces any snapshot captured before the boundary, so a successor
+        policy can take over from the boundary onward while historical replay
+        remains intact. A boundary that would recreate an overlap returns 409.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scoring_policy:
+                  type: object
+                  required: [effective_until]
+                  properties:
+                    effective_until: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Bounded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringPolicy" }
+        "409":
+          description: Boundary would overlap another published policy
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OverlapError" }
@@ -216,6 +267,11 @@ paths:
           in: query
           required: false
           schema: { type: string, enum: [schedulable, blocked] }
+        - name: current
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: When true, only the current score per hazard point is returned.
       responses:
         "200":
           description: OK
@@ -268,6 +324,12 @@ components:
       type: object
       required: [captured_at, rainfall_mm_24h, historical_event_count, road_accessible]
       properties:
+        business_key:
+          type: string
+          nullable: true
+          description: |
+            Optional stable identifier. Same key + same payload is idempotent;
+            same key + different payload is a 409 conflict.
         captured_at: { type: string, format: date-time, description: "LOCKED evidence instant" }
         rainfall_mm_24h: { type: number }
         historical_event_count: { type: integer }
@@ -283,10 +345,15 @@ components:
             content_digest: { type: string, description: "SHA256 of frozen facts" }
     ScoringPolicyInput:
       type: object
-      required: [version, effective_at, definition]
+      required: [version, effective_from, definition]
       properties:
         version: { type: string }
-        effective_at: { type: string, format: date-time }
+        effective_from: { type: string, format: date-time }
+        effective_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: End of the half-open validity interval; null = open-ended.
         definition:
           type: object
           description: Declarative weights/thresholds consumed only by the scoring engine.
@@ -314,6 +381,8 @@ components:
           properties:
             id: { type: integer }
             version: { type: string }
+            effective_from: { type: string, format: date-time }
+            effective_until: { type: string, format: date-time, nullable: true }
         components:
           type: array
           items: { $ref: "#/components/schemas/Component" }
@@ -322,6 +391,7 @@ components:
         risk_level: { type: string, enum: [low, moderate, high, extreme] }
         scheduling_status: { type: string, enum: [schedulable, blocked] }
         road_blocked: { type: boolean }
+        current: { type: boolean, description: "True if the authoritative score for its hazard point" }
     QueueItem:
       type: object
       properties:
@@ -332,6 +402,7 @@ components:
         scheduling_status: { type: string }
         policy_version: { type: string }
         evidence_snapshot_id: { type: integer }
+        current: { type: boolean }
     QueuePage:
       type: object
       properties:
@@ -349,4 +420,11 @@ components:
         - { $ref: "#/components/schemas/Error" }
         - type: object
           properties:
-            effective_at: { type: string, format: date-time }
+            effective_from: { type: string, format: date-time }
+            effective_until: { type: string, format: date-time, nullable: true }
+    BusinessKeyError:
+      allOf:
+        - { $ref: "#/components/schemas/Error" }
+        - type: object
+          properties:
+            business_key: { type: string }

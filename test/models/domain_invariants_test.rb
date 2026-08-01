@@ -28,28 +28,48 @@ class EvidenceSnapshotTest < ActiveSupport::TestCase
 end
 
 class ScoringPolicySelectionTest < ActiveSupport::TestCase
-  test "authoritative policy is the greatest effective_at not after captured_at" do
-    old = create_policy!(version: "v1", effective_at: Time.utc(2026, 7, 1))
-    new = create_policy!(version: "v2", effective_at: Time.utc(2026, 7, 20))
+  test "authoritative policy is the one whose interval contains captured_at" do
+    v1 = create_policy!(version: "v1", effective_from: Time.utc(2026, 1, 1),
+                        effective_until: Time.utc(2026, 8, 2))
+    v2 = create_policy!(version: "v2", effective_from: Time.utc(2026, 8, 2))
 
-    assert_equal new, ScoringPolicy.authoritative_for(Time.utc(2026, 7, 25))
-    assert_equal old, ScoringPolicy.authoritative_for(Time.utc(2026, 7, 10))
-    assert_nil ScoringPolicy.authoritative_for(Time.utc(2026, 6, 1))
+    assert_equal v1, ScoringPolicy.authoritative_for(Time.utc(2026, 7, 10))
+    # Half-open [from, until): the boundary instant belongs to v2, not v1.
+    assert_equal v2, ScoringPolicy.authoritative_for(Time.utc(2026, 8, 2))
+    assert_equal v2, ScoringPolicy.authoritative_for(Time.utc(2026, 9, 1))
+    assert_nil ScoringPolicy.authoritative_for(Time.utc(2025, 12, 31))
   end
 
   test "draft policies are never authoritative" do
-    create_policy!(version: "draft-1", effective_at: Time.utc(2026, 7, 1), publish: false)
+    create_policy!(version: "draft-1", effective_from: Time.utc(2026, 7, 1), publish: false)
     assert_nil ScoringPolicy.authoritative_for(Time.utc(2026, 8, 1))
   end
 
-  test "publishing two policies at the same effective_at is rejected" do
-    at = Time.utc(2026, 7, 15, 8, 0, 0)
-    create_policy!(version: "cand-a", effective_at: at)
+  test "publishing a policy whose interval overlaps a published one is rejected" do
+    create_policy!(version: "cand-a", effective_from: Time.utc(2026, 1, 1),
+                   effective_until: Time.utc(2026, 8, 2))
 
-    err = assert_raises(Scoring::OverlappingPolicyError) do
-      create_policy!(version: "cand-b", effective_at: at)
+    assert_raises(Scoring::OverlappingPolicyError) do
+      # Overlaps [2026-01-01, 2026-08-02) on the 2026-07 window.
+      create_policy!(version: "cand-b", effective_from: Time.utc(2026, 7, 1),
+                     effective_until: Time.utc(2026, 9, 1))
     end
-    assert_equal at, err.effective_at
-    assert_equal 1, ScoringPolicy.published.where(effective_at: at).count
+    assert_equal 1, ScoringPolicy.published.count
+  end
+
+  test "bounding a published policy lets a successor start without retiring it" do
+    v1 = create_policy!(version: "adj-v1", effective_from: Time.utc(2026, 1, 1))
+    # Adjacent successor would overlap the open-ended v1 until v1 is bounded.
+    assert_raises(Scoring::OverlappingPolicyError) do
+      create_policy!(version: "adj-v2", effective_from: Time.utc(2026, 8, 2))
+    end
+
+    v1.bound!(Time.utc(2026, 8, 2))
+    v2 = create_policy!(version: "adj-v2b", effective_from: Time.utc(2026, 8, 2))
+
+    # v1 is still published and still authoritative for its (now bounded) window.
+    assert v1.reload.published?
+    assert_equal v1, ScoringPolicy.authoritative_for(Time.utc(2026, 6, 1))
+    assert_equal v2, ScoringPolicy.authoritative_for(Time.utc(2026, 8, 2))
   end
 end

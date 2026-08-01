@@ -16,6 +16,7 @@ Rails.application.routes.draw do
       resources :scoring_policies, only: %i[index show create] do
         member do
           post :publish
+          patch :bound
         end
         # Stable, keyset-paginated queue for a policy version.
         get :queue, to: "priorities#queue"

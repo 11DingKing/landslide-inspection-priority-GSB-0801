@@ -21,7 +21,8 @@ module Api
         page = Scoring::Queue.new(policy: policy).page(
           limit: params[:limit],
           cursor: params[:cursor],
-          scheduling_status: params[:scheduling_status]
+          scheduling_status: params[:scheduling_status],
+          current: params[:current]
         )
         render json: page.to_h
       end

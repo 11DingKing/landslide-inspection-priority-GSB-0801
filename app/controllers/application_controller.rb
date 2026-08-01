@@ -7,6 +7,7 @@ class ApplicationController < ActionController::API
   rescue_from ActionController::ParameterMissing, with: :render_bad_request
   rescue_from ArgumentError, with: :render_bad_request
   rescue_from Scoring::OverlappingPolicyError, with: :render_overlap_conflict
+  rescue_from Scoring::ConflictingBusinessKeyError, with: :render_business_key_conflict
   rescue_from Scoring::NoAuthoritativePolicyError, with: :render_unprocessable
 
   private
@@ -27,7 +28,16 @@ class ApplicationController < ActionController::API
     render json: {
       error: "overlapping_policy",
       message: error.message,
-      effective_at: error.effective_at&.utc&.iso8601
+      effective_from: error.effective_from&.utc&.iso8601,
+      effective_until: error.effective_until&.utc&.iso8601
+    }, status: :conflict
+  end
+
+  def render_business_key_conflict(error)
+    render json: {
+      error: "conflicting_business_key",
+      message: error.message,
+      business_key: error.business_key
     }, status: :conflict
   end
 

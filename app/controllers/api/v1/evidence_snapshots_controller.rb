@@ -16,7 +16,11 @@ module Api
 
       def create
         point = HazardPoint.find(params[:hazard_point_id])
-        snapshot = point.evidence_snapshots.create!(snapshot_params)
+        attrs = snapshot_params.to_h.symbolize_keys
+        business_key = attrs.delete(:business_key)
+        snapshot = EvidenceSnapshot.capture!(
+          hazard_point: point, business_key: business_key, **attrs
+        )
         render json: serialize(snapshot), status: :created
       end
 
@@ -25,7 +29,7 @@ module Api
       def snapshot_params
         params.require(:evidence_snapshot).permit(
           :captured_at, :rainfall_mm_24h, :historical_event_count,
-          :road_accessible, :point_last_inspected_at
+          :road_accessible, :point_last_inspected_at, :business_key
         )
       end
 
@@ -33,6 +37,7 @@ module Api
         {
           id: snapshot.id,
           hazard_point_id: snapshot.hazard_point_id,
+          business_key: snapshot.business_key,
           captured_at: snapshot.captured_at.utc.iso8601,
           rainfall_mm_24h: snapshot.rainfall_mm_24h.to_s("F"),
           historical_event_count: snapshot.historical_event_count,

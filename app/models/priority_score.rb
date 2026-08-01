@@ -23,6 +23,7 @@ class PriorityScore < ApplicationRecord
   # hazard_point_id. Because the tiebreak key never changes, inserting new equal-
   # scored rows during continuous writes never reshuffles earlier pages.
   scope :queue_ordered, -> { order(total_score: :desc, hazard_point_id: :asc) }
+  scope :current, -> { where(current: true) }
 
   def blocked?
     scheduling_status == "blocked"
