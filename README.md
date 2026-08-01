@@ -20,6 +20,7 @@ Ruby 3.4 · Rails 8.1 (API 模式) · PostgreSQL
 | 业务标识幂等 | 快照 `client_reference` 唯一；同标识同内容重复提交返回 200 与原快照及评分，同标识不同内容返回 409，并发重复提交也只落一条快照、一条评分 |
 | 并发计算幂等 | `(evidence_snapshot_id, strategy_version_id)` 唯一索引 + 每点位唯一 current 部分索引；策略切换期间并发计算只产生一条新 current 记录，历史 ScoreRecord 的分数与版本绑定不被改写（仅 `is_current` 指针前移） |
 | 万级稳定分页 | 队列按 `(total_score DESC, id ASC)` 键集（keyset）分页，同分且持续写入时页序不来回跳；部分索引 `WHERE is_current` 支撑排序 |
+| 具名队列读取快照 | `QueueSnapshot.capture!` 在采集时刻物化队列成员并钉住适用策略轮次；`GET /inspection_queue?snapshot=queue-20260802-01` 的 cursor 遍历固定在快照上——翻页中途写入新证据并重算（current 移动）不漏项、不重复，实时视图（不传 snapshot）才能看到更新 |
 
 评分规则全部集中在 `app/services/scoring/engine.rb`（纯 Ruby，无数据库、
 无时钟副作用）；控制器与 ActiveRecord callback 中没有任何评分规则。
@@ -88,6 +89,12 @@ OpenAPI 文档见 [openapi/openapi.yaml](openapi/openapi.yaml)。
 curl 'http://localhost:3000/api/v1/inspection_queue?limit=50'
 # 翻页：带上上一页返回的 next_cursor
 curl "http://localhost:3000/api/v1/inspection_queue?limit=50&cursor=$NEXT_CURSOR"
+
+# 队列读取快照：创建（幂等）并固定遍历，翻页中途的重算不影响本次遍历
+curl -X POST http://localhost:3000/api/v1/queue_snapshots \
+  -H 'Content-Type: application/json' \
+  -d '{"queue_snapshot":{"name":"queue-20260802-01","at":"2026-08-02T00:00:00Z"}}'
+curl 'http://localhost:3000/api/v1/inspection_queue?snapshot=queue-20260802-01&limit=50'
 
 # 计算/重放某快照的优先级（省略策略版本 = 按快照时间解析当时的版本）
 curl -X POST http://localhost:3000/api/v1/priorities \

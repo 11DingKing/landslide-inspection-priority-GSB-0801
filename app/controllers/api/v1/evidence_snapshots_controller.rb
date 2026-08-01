@@ -23,8 +23,13 @@ module Api
       rescue ActiveRecord::RecordNotUnique
         # Lost an insert race on the client_reference unique index: the winner
         # has committed by now, so resolve this as an idempotent resubmission.
-        existing = EvidenceSnapshot.find_by!(client_reference: reference)
-        render_idempotent(existing, point, attrs)
+        render_idempotent(EvidenceSnapshot.find_by!(client_reference: reference), point, attrs)
+      rescue ActiveRecord::RecordInvalid => e
+        # The model-level uniqueness validation lost the same race (the winner
+        # committed between the check and the insert).
+        raise e unless reference && e.record.errors[:client_reference].any?
+
+        render_idempotent(EvidenceSnapshot.find_by!(client_reference: reference), point, attrs)
       end
 
       private

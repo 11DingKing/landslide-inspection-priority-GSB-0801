@@ -56,6 +56,8 @@ module ActiveSupport
     # Test cleanup must temporarily lift the immutability trigger; production
     # code paths can never do this accidentally.
     def clean_tables!
+      QueueSnapshotEntry.delete_all
+      QueueSnapshot.delete_all
       ScoreRecord.delete_all
       EvidenceSnapshot.connection.execute(
         "ALTER TABLE evidence_snapshots DISABLE TRIGGER evidence_snapshots_no_update"

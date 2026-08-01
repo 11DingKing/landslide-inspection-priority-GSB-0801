@@ -4,6 +4,7 @@ class ScoreRecord < ApplicationRecord
   belongs_to :hazard_point
   belongs_to :evidence_snapshot
   belongs_to :strategy_version
+  has_many :queue_snapshot_entries, dependent: :restrict_with_error
 
   validates :total_score, presence: true,
             numericality: { only_integer: true, in: Scoring::Engine::TOTAL_RANGE }

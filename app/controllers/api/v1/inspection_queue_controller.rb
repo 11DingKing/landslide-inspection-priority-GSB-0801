@@ -2,19 +2,29 @@
 
 module Api
   module V1
-    # The inspection queue: every hazard point appears once with its current
-    # score, ordered by (total_score DESC, id ASC) with keyset pagination.
-    # Blocked points keep their original risk level and are merely flagged —
-    # pass scheduling_status=schedulable to hide them from a patrol plan.
+    # The inspection queue. Without parameters this is the live view: every
+    # hazard point appears once with its current score. Passing
+    # ?snapshot=<name> pins the traversal to a previously captured queue
+    # snapshot (membership and strategy round fixed at capture time), so
+    # continuing with an old cursor can neither skip nor duplicate entries
+    # when recomputation moves the live current pointer.
     class InspectionQueueController < ApplicationController
       def index
+        snapshot = params[:snapshot].presence &&
+                   QueueSnapshot.find_by!(name: params[:snapshot])
+
         entry = InspectionQueue.call(
           limit: params[:limit] || InspectionQueue::DEFAULT_LIMIT,
           cursor: params[:cursor],
-          scheduling_status: params[:scheduling_status].presence
+          scheduling_status: params[:scheduling_status].presence,
+          snapshot: snapshot
         )
 
         render json: {
+          "snapshot" => snapshot && {
+            "name" => snapshot.name,
+            "strategy_version" => snapshot.strategy_version.version
+          },
           "entries" => entry.records.map { |r| serialize(r) },
           "next_cursor" => entry.next_cursor
         }

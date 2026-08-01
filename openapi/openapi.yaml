@@ -237,16 +237,90 @@ paths:
               schema: { $ref: "#/components/schemas/Explanation" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/queue_snapshots:
+    post:
+      tags: [inspection-queue]
+      summary: 创建具名队列读取快照
+      description: |
+        物化创建时刻（或显式 `at` 时刻）的队列成员与适用的策略轮次。
+        同名重复创建幂等：返回原快照（200）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [queue_snapshot]
+              properties:
+                queue_snapshot:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: { type: string, example: queue-20260802-01 }
+                    at:
+                      type: string
+                      format: date-time
+                      description: 可选采集时刻；钉住的策略轮次为该时刻适用的已发布版本
+                      example: "2026-08-02T00:00:00Z"
+      responses:
+        "200":
+          description: 同名快照已存在，返回原快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    get:
+      tags: [inspection-queue]
+      summary: 列出队列读取快照
+      responses:
+        "200":
+          description: 快照列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/QueueSnapshot" }
+
+  /api/v1/queue_snapshots/{id}:
+    get:
+      tags: [inspection-queue]
+      summary: 查看队列读取快照（按名称）
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 快照名称（如 queue-20260802-01）
+          schema: { type: string }
+      responses:
+        "200":
+          description: 快照元数据
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/inspection_queue:
     get:
       tags: [inspection-queue]
-      summary: 检索巡查队列（键集分页）
+      summary: 检索巡查队列（键集分页，可钉在队列快照上）
       description: |
-        每个隐患点以其当前评分出现一次，按 `(total_score DESC, id ASC)`
-        排序。`cursor` 为上一页返回的 `next_cursor`；持续写入下同分记录
-        不会在已翻过的页之间来回跳动。阻塞点位保留原始风险等级并标记
-        `scheduling_status=blocked`。
+        默认是实时视图：每个隐患点以其当前评分出现一次，按
+        `(total_score DESC, id ASC)` 排序。传入 `snapshot=<名称>` 时遍历
+        固定到该队列读取快照：成员与策略轮次在采集时物化，翻页中途发生
+        的重算（current 指针移动）不会造成漏项或重复；只有新的遍历
+        （不传 snapshot 或使用新快照）才能看到更新结果。
+        `cursor` 为上一页返回的 `next_cursor`。阻塞点位保留原始风险等级
+        并标记 `scheduling_status=blocked`。
       parameters:
+        - name: snapshot
+          in: query
+          description: 队列读取快照名称；缺省为实时视图
+          schema: { type: string, example: queue-20260802-01 }
         - name: limit
           in: query
           schema: { type: integer, default: 50, maximum: 500 }
@@ -264,6 +338,12 @@ paths:
               schema:
                 type: object
                 properties:
+                  snapshot:
+                    nullable: true
+                    type: object
+                    properties:
+                      name: { type: string }
+                      strategy_version: { type: integer }
                   entries:
                     type: array
                     items: { $ref: "#/components/schemas/QueueEntry" }
@@ -273,6 +353,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
 components:
   parameters:
@@ -418,6 +499,15 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Component" }
         components_sum: { type: integer }
+
+    QueueSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        strategy_version: { type: integer, description: 采集时刻钉住的策略轮次 }
+        strategy_round_pinned_at: { type: string, format: date-time }
+        entry_count: { type: integer }
 
     QueueEntry:
       type: object

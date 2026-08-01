@@ -17,6 +17,7 @@ Rails.application.routes.draw do
       resources :priorities, only: %i[create] do
         member { get :explanation }
       end
+      resources :queue_snapshots, only: %i[index show create]
       get "inspection_queue" => "inspection_queue#index"
     end
   end

@@ -126,3 +126,17 @@ SEED_POINTS.each do |attrs|
               record.scheduling_status, record.strategy_version.version,
               record.components.to_json)
 end
+
+# Named queue read snapshot: pins the strategy round (round 2 == v2, since
+# the snapshot is taken at the 2026-08-02 boundary) and the current
+# membership, so cursor traversals stay stable across later recomputations.
+queue_snapshot = QueueSnapshot.find_by(name: "queue-20260802-01")
+if queue_snapshot.nil?
+  queue_snapshot = QueueSnapshot.capture!(
+    name: "queue-20260802-01",
+    at: Time.zone.parse("2026-08-02 00:00:00 UTC")
+  )
+end
+puts format("queue snapshot %-20s entries=%d strategy=v%d",
+            queue_snapshot.name, queue_snapshot.entry_count,
+            queue_snapshot.strategy_version.version)

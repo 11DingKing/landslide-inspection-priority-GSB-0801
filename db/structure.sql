@@ -126,6 +126,68 @@ ALTER SEQUENCE public.hazard_points_id_seq OWNED BY public.hazard_points.id;
 
 
 --
+-- Name: queue_snapshot_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.queue_snapshot_entries (
+    id bigint NOT NULL,
+    queue_snapshot_id bigint NOT NULL,
+    score_record_id bigint NOT NULL
+);
+
+
+--
+-- Name: queue_snapshot_entries_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.queue_snapshot_entries_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: queue_snapshot_entries_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.queue_snapshot_entries_id_seq OWNED BY public.queue_snapshot_entries.id;
+
+
+--
+-- Name: queue_snapshots; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.queue_snapshots (
+    id bigint NOT NULL,
+    name character varying NOT NULL,
+    strategy_version_id bigint NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL
+);
+
+
+--
+-- Name: queue_snapshots_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.queue_snapshots_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: queue_snapshots_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.queue_snapshots_id_seq OWNED BY public.queue_snapshots.id;
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -226,6 +288,20 @@ ALTER TABLE ONLY public.hazard_points ALTER COLUMN id SET DEFAULT nextval('publi
 
 
 --
+-- Name: queue_snapshot_entries id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshot_entries ALTER COLUMN id SET DEFAULT nextval('public.queue_snapshot_entries_id_seq'::regclass);
+
+
+--
+-- Name: queue_snapshots id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshots ALTER COLUMN id SET DEFAULT nextval('public.queue_snapshots_id_seq'::regclass);
+
+
+--
 -- Name: score_records id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -264,6 +340,22 @@ ALTER TABLE ONLY public.hazard_points
 
 
 --
+-- Name: queue_snapshot_entries queue_snapshot_entries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshot_entries
+    ADD CONSTRAINT queue_snapshot_entries_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: queue_snapshots queue_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshots
+    ADD CONSTRAINT queue_snapshots_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -293,6 +385,13 @@ ALTER TABLE ONLY public.strategy_versions
 
 ALTER TABLE ONLY public.strategy_versions
     ADD CONSTRAINT strategy_versions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: idx_queue_snapshot_entries_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_queue_snapshot_entries_unique ON public.queue_snapshot_entries USING btree (queue_snapshot_id, score_record_id);
 
 
 --
@@ -345,6 +444,34 @@ CREATE UNIQUE INDEX index_hazard_points_on_external_code ON public.hazard_points
 
 
 --
+-- Name: index_queue_snapshot_entries_on_queue_snapshot_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_queue_snapshot_entries_on_queue_snapshot_id ON public.queue_snapshot_entries USING btree (queue_snapshot_id);
+
+
+--
+-- Name: index_queue_snapshot_entries_on_score_record_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_queue_snapshot_entries_on_score_record_id ON public.queue_snapshot_entries USING btree (score_record_id);
+
+
+--
+-- Name: index_queue_snapshots_on_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_queue_snapshots_on_name ON public.queue_snapshots USING btree (name);
+
+
+--
+-- Name: index_queue_snapshots_on_strategy_version_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_queue_snapshots_on_strategy_version_id ON public.queue_snapshots USING btree (strategy_version_id);
+
+
+--
 -- Name: index_score_records_on_evidence_snapshot_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -377,6 +504,30 @@ CREATE UNIQUE INDEX index_strategy_versions_on_version ON public.strategy_versio
 --
 
 CREATE TRIGGER evidence_snapshots_no_update BEFORE DELETE OR UPDATE ON public.evidence_snapshots FOR EACH ROW EXECUTE FUNCTION public.evidence_snapshots_immutable();
+
+
+--
+-- Name: queue_snapshots fk_rails_295f9cbb5e; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshots
+    ADD CONSTRAINT fk_rails_295f9cbb5e FOREIGN KEY (strategy_version_id) REFERENCES public.strategy_versions(id);
+
+
+--
+-- Name: queue_snapshot_entries fk_rails_4da19adcda; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshot_entries
+    ADD CONSTRAINT fk_rails_4da19adcda FOREIGN KEY (queue_snapshot_id) REFERENCES public.queue_snapshots(id);
+
+
+--
+-- Name: queue_snapshot_entries fk_rails_51f988081a; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_snapshot_entries
+    ADD CONSTRAINT fk_rails_51f988081a FOREIGN KEY (score_record_id) REFERENCES public.score_records(id);
 
 
 --
@@ -418,6 +569,7 @@ ALTER TABLE ONLY public.score_records
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20260802000000'),
 ('20260801120000'),
 ('20260801000004'),
 ('20260801000003'),

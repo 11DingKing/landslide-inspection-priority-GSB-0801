@@ -114,19 +114,22 @@ class EvidenceSnapshotsApiTest < ActionDispatch::IntegrationTest
 
   test "concurrent identical submissions leave exactly one snapshot and one score" do
     results = Concurrent::Array.new
+    bodies = Concurrent::Array.new
     url = "/api/v1/hazard_points/#{@point.id}/evidence_snapshots"
     threads = 3.times.map do
       Thread.new do
         session = open_session
         session.post url, params: boundary_payload, as: :json
         results << session.response.status
+        bodies << session.response.parsed_body
       end
     end
     threads.each(&:join)
 
     assert_equal 1, EvidenceSnapshot.where(client_reference: "evidence-rds-002-20260802-0000").count
     assert_equal 1, ScoreRecord.count
-    assert results.all? { |s| [200, 201].include?(s) }
+    assert results.all? { |s| [200, 201].include?(s) },
+           "unexpected statuses: #{results.inspect} bodies: #{bodies.inspect}"
   end
 
   test "concurrent computation during the strategy switch keeps one current score and never rewrites history" do
