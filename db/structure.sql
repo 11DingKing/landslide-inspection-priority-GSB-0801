@@ -68,7 +68,8 @@ CREATE TABLE public.evidence_snapshots (
     captured_at timestamp(6) without time zone NOT NULL,
     note text,
     created_at timestamp(6) without time zone NOT NULL,
-    updated_at timestamp(6) without time zone NOT NULL
+    updated_at timestamp(6) without time zone NOT NULL,
+    client_reference character varying
 );
 
 
@@ -316,6 +317,13 @@ CREATE UNIQUE INDEX idx_score_records_snapshot_strategy ON public.score_records 
 
 
 --
+-- Name: index_evidence_snapshots_on_client_reference; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_evidence_snapshots_on_client_reference ON public.evidence_snapshots USING btree (client_reference);
+
+
+--
 -- Name: index_evidence_snapshots_on_hazard_point_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -410,6 +418,7 @@ ALTER TABLE ONLY public.score_records
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20260801120000'),
 ('20260801000004'),
 ('20260801000003'),
 ('20260801000002'),

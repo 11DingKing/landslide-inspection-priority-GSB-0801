@@ -67,7 +67,12 @@ paths:
     post:
       tags: [evidence-snapshots]
       summary: 为隐患点采集一份不可变证据快照
-      description: 快照一旦创建不可修改、不可删除；`captured_at` 即锁定的快照时间。
+      description: |
+        快照一旦创建不可修改、不可删除；`captured_at` 即锁定的快照时间。
+        `client_reference` 是调用方提供的稳定业务标识：
+        相同标识 + 相同内容重复提交返回 200 与原快照及其评分（幂等）；
+        相同标识 + 不同内容返回 409。响应始终附带该快照的评分（按快照
+        `captured_at` 解析适用策略，取不到策略时 `score` 为 null）。
       parameters:
         - { $ref: "#/components/parameters/HazardPointId" }
       requestBody:
@@ -82,18 +87,29 @@ paths:
                   type: object
                   required: [rainfall_24h_mm, historical_event_count, road_accessible, captured_at]
                   properties:
-                    rainfall_24h_mm: { type: number, example: 186 }
-                    historical_event_count: { type: integer, example: 2 }
+                    client_reference: { type: string, example: evidence-rds-002-20260802-0000 }
+                    rainfall_24h_mm: { type: number, example: 210 }
+                    historical_event_count: { type: integer, example: 0 }
                     last_inspected_at: { type: string, format: date-time, nullable: true }
-                    road_accessible: { type: boolean, example: true }
-                    captured_at: { type: string, format: date-time }
+                    road_accessible: { type: boolean, example: false }
+                    captured_at: { type: string, format: date-time, example: "2026-08-02T00:00:00Z" }
                     note: { type: string }
       responses:
-        "201":
-          description: 已创建
+        "200":
+          description: 幂等命中：相同业务标识与内容，返回原快照与评分
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+              schema: { $ref: "#/components/schemas/EvidenceSnapshotWithScore" }
+        "201":
+          description: 已创建（含评分）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshotWithScore" }
+        "409":
+          description: 相同业务标识但内容不同
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "422": { $ref: "#/components/responses/Unprocessable" }
 
   /api/v1/strategy_versions:
@@ -307,12 +323,22 @@ components:
       properties:
         id: { type: integer }
         hazard_point_id: { type: integer }
-        rainfall_24h_mm: { type: string, example: "186.0" }
+        client_reference: { type: string, nullable: true }
+        rainfall_24h_mm: { type: string, example: "210.0" }
         historical_event_count: { type: integer }
         last_inspected_at: { type: string, format: date-time, nullable: true }
         road_accessible: { type: boolean }
         captured_at: { type: string, format: date-time }
         note: { type: string, nullable: true }
+
+    EvidenceSnapshotWithScore:
+      allOf:
+        - $ref: "#/components/schemas/EvidenceSnapshot"
+        - type: object
+          properties:
+            score:
+              nullable: true
+              $ref: "#/components/schemas/Explanation"
 
     Rules:
       type: object
