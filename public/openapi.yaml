@@ -1,0 +1,548 @@
+openapi: 3.0.3
+info:
+  title: 地灾巡查优先级服务 API
+  version: 1.0.0
+  description: |
+    连续强降雨后对隐患点进行可解释的巡查优先级排序。
+
+    关键设计：
+    * 评分规则集中在 ScoringEngine，控制器与 ActiveRecord callback 不包含评分规则。
+    * ScoringStrategy 可版本化，按 effective_at 解析唯一生效版本；同一生效时刻发布两个候选会被唯一索引拒绝。
+    * EvidenceSnapshot 不可变（DB 触发器禁止 UPDATE/DELETE），保存当时原始证据、分项得分、总分、风险等级与调度状态。
+    * 分项得分之和严格等于总分。
+    * 道路不可达只把 dispatch_status 标记为 blocked，不修改 total_score 与 risk_level。
+    * 队列使用 (total_score DESC, id ASC) 游标分页，相同得分下顺序稳定，持续写入不会跳页。
+
+servers:
+  - url: /api/v1
+
+tags:
+  - name: hazard_points
+    description: 隐患点管理
+  - name: priorities
+    description: 优先级计算与解释
+  - name: queue
+    description: 巡查队列检索
+  - name: strategies
+    description: 评分策略版本
+  - name: snapshots
+    description: 不可变证据快照
+
+paths:
+  /hazard_points:
+    get:
+      tags: [hazard_points]
+      summary: 列出隐患点
+      responses:
+        "200":
+          description: 隐患点数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HazardPoint" }
+    post:
+      tags: [hazard_points]
+      summary: 创建隐患点
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HazardPointInput" }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "422":
+          description: 参数非法
+
+  /hazard_points/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [hazard_points]
+      summary: 隐患点详情
+      responses:
+        "200":
+          description: 详情
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [hazard_points]
+      summary: 更新隐患点（如最新降水、道路状态、巡查时间）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HazardPointInput" }
+      responses:
+        "200":
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      tags: [hazard_points]
+      summary: 删除隐患点（存在快照时被限制）
+      responses:
+        "204": { description: 已删除 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hazard_points/{id}/calculate_priority:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [priorities]
+      summary: 计算并生成一条不可变优先级快照
+      description: |
+        使用当前生效（或指定）的评分策略，读取隐患点当前证据生成快照。
+        可通过 rainfall_24h_mm 覆盖本次降水量（不会修改隐患点）。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                at:
+                  type: string
+                  format: date-time
+                  description: 证据/快照时间（ISO8601），默认当前时间
+                strategy_version:
+                  type: integer
+                  description: 指定策略版本号进行计算
+                rainfall_24h_mm:
+                  type: number
+                  description: 覆盖本次 24 小时降水量
+      responses:
+        "201":
+          description: 已生成快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 无生效策略
+
+  /hazard_points/{id}/priority:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [priorities]
+      summary: 获取该隐患点最新优先级快照
+      responses:
+        "200":
+          description: 最新快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hazard_points/{id}/priority_explanation:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [priorities]
+      summary: 获取最新（或指定）快照的可解释分项
+      parameters:
+        - name: snapshot_id
+          in: query
+          schema: { type: integer }
+          description: 指定快照 ID，默认最新
+      responses:
+        "200":
+          description: 解释
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshot_id: { type: integer }
+                  strategy_version: { type: integer }
+                  total_score: { type: integer }
+                  sum_of_items:
+                    type: integer
+                    description: 分项之和，严格等于 total_score
+                  risk_level: { $ref: "#/components/schemas/RiskLevel" }
+                  dispatch_status: { $ref: "#/components/schemas/DispatchStatus" }
+                  score_breakdown:
+                    type: array
+                    items: { $ref: "#/components/schemas/ScoreItem" }
+                  explanation: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /queue:
+    get:
+      tags: [queue]
+      summary: 巡查优先级队列（稳定游标分页）
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: 上一页 next_cursor（Base64 编码的 score:id）
+        - name: dispatch_status
+          in: query
+          schema: { $ref: "#/components/schemas/DispatchStatus" }
+        - name: include_blocked
+          in: query
+          schema: { type: boolean, default: true }
+          description: false 时仅返回可调度点
+        - name: strategy_version
+          in: query
+          schema: { type: integer }
+          description: 只查看某策略版本下的快照
+      responses:
+        "200":
+          description: 分页队列
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queue:
+                    type: array
+                    items: { $ref: "#/components/schemas/QueueItem" }
+                  meta:
+                    type: object
+                    properties:
+                      total_count: { type: integer }
+                      next_cursor: { type: string, nullable: true }
+                      limit: { type: integer }
+
+  /strategies:
+    get:
+      tags: [strategies]
+      summary: 列出策略版本
+      responses:
+        "200":
+          description: 策略数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScoringStrategy" }
+    post:
+      tags: [strategies]
+      summary: 创建草稿策略
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StrategyInput" }
+      responses:
+        "201":
+          description: 已创建草稿
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringStrategy" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /strategies/active:
+    get:
+      tags: [strategies]
+      summary: 解析指定时刻生效的唯一策略
+      parameters:
+        - name: at
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: 生效策略
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringStrategy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /strategies/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [strategies]
+      summary: 策略详情
+      responses:
+        "200":
+          description: 策略
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringStrategy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /strategies/{id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [strategies]
+      summary: 发布草稿策略
+      description: |
+        发布后规则与生效时间不可变。同一 effective_at 已存在已发布策略时返回 409。
+      responses:
+        "200":
+          description: 已发布
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringStrategy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 同一生效时刻已存在发布策略
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /snapshots:
+    get:
+      tags: [snapshots]
+      summary: 列出快照
+      parameters:
+        - name: hazard_point_id
+          in: query
+          schema: { type: integer }
+        - name: strategy_version
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: 快照数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/EvidenceSnapshot" }
+
+  /snapshots/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [snapshots]
+      summary: 快照详情
+      responses:
+        "200":
+          description: 快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /snapshots/{id}/replay:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [snapshots]
+      summary: 用指定策略版本重放历史快照
+      description: |
+        复用原快照的原始证据，以新策略版本重新评分并生成一条新的不可变快照；
+        原快照不会被修改。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy_version]
+              properties:
+                strategy_version: { type: integer }
+      responses:
+        "201":
+          description: 重放生成的新快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: 参数校验失败
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+
+    PointType:
+      type: string
+      enum: [cut_slope_building, road_slope, registered_hazard]
+    RiskLevel:
+      type: string
+      enum: [low, medium, high, critical]
+    DispatchStatus:
+      type: string
+      enum: [schedulable, blocked]
+    RoadStatus:
+      type: string
+      enum: [accessible, closed]
+
+    HazardPoint:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        point_type: { $ref: "#/components/schemas/PointType" }
+        location: { type: string, nullable: true }
+        road_accessible: { type: boolean }
+        road_status: { $ref: "#/components/schemas/RoadStatus" }
+        road_closed_at: { type: string, format: date-time, nullable: true }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+        historical_event_count: { type: integer }
+        latest_rainfall_24h_mm: { type: number }
+
+    HazardPointInput:
+      type: object
+      properties:
+        name: { type: string }
+        point_type: { $ref: "#/components/schemas/PointType" }
+        location: { type: string }
+        road_accessible: { type: boolean }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+        historical_event_count: { type: integer }
+        latest_rainfall_24h_mm: { type: number }
+
+    ScoreItem:
+      type: object
+      properties:
+        key: { type: string, description: 锁定的分项标识 }
+        name: { type: string, description: 锁定的分项名称 }
+        score: { type: integer, description: 本项得分 }
+        max: { type: integer, description: 本项满分（锁定的得分范围上限） }
+        reason: { type: string }
+
+    Evidence:
+      type: object
+      properties:
+        rainfall_24h_mm: { type: number }
+        historical_event_count: { type: integer }
+        point_type: { $ref: "#/components/schemas/PointType" }
+        road_status: { $ref: "#/components/schemas/RoadStatus" }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+
+    EvidenceSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        hazard_point_id: { type: integer }
+        snapshot_at:
+          type: string
+          format: date-time
+          description: 锁定的快照时间
+        evidence: { $ref: "#/components/schemas/Evidence" }
+        scoring:
+          type: object
+          properties:
+            strategy_version:
+              type: integer
+              description: 评分时使用的规则版本
+            total_score:
+              type: integer
+              description: 总分，严格等于 score_breakdown 各项 score 之和
+            risk_level: { $ref: "#/components/schemas/RiskLevel" }
+            dispatch_status:
+              $ref: "#/components/schemas/DispatchStatus"
+            score_breakdown:
+              type: array
+              items: { $ref: "#/components/schemas/ScoreItem" }
+        explanation:
+          type: object
+          description: 人类可读解释，包含分项理由与汇总
+        immutable:
+          type: boolean
+          description: 快照是否不可变（恒为 true）
+
+    QueueItem:
+      type: object
+      properties:
+        snapshot_id: { type: integer }
+        hazard_point_id: { type: integer }
+        name: { type: string }
+        point_type: { $ref: "#/components/schemas/PointType" }
+        total_score: { type: integer }
+        risk_level: { $ref: "#/components/schemas/RiskLevel" }
+        dispatch_status: { $ref: "#/components/schemas/DispatchStatus" }
+        road_status: { $ref: "#/components/schemas/RoadStatus" }
+        snapshot_at: { type: string, format: date-time }
+        strategy_version: { type: integer }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+
+    RuleItem:
+      type: object
+      description: 版本化规则中的一个分项定义（名称与得分范围随版本锁定）
+      properties:
+        key: { type: string }
+        name: { type: string }
+        type:
+          type: string
+          enum: [numeric_tier, categorical, inspection_recency]
+        max: { type: integer }
+        field: { type: string }
+        tiers:
+          type: array
+          items:
+            type: object
+            properties:
+              min: { type: number }
+              max: { type: number, nullable: true }
+              score: { type: integer }
+        values:
+          type: object
+          additionalProperties: { type: integer }
+
+    ScoringStrategy:
+      type: object
+      properties:
+        id: { type: integer }
+        version: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        effective_at: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [draft, published]
+        rules:
+          type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/RuleItem" }
+            risk_levels:
+              type: array
+              items:
+                type: object
+                properties:
+                  min: { type: integer }
+                  max: { type: integer, nullable: true }
+                  level: { $ref: "#/components/schemas/RiskLevel" }
+
+    StrategyInput:
+      type: object
+      required: [name, effective_at, rules]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        effective_at: { type: string, format: date-time }
+        version: { type: integer }
+        rules: { type: object }
