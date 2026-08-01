@@ -23,6 +23,7 @@ Built with **Ruby 3.4**, **Rails 8 (API mode)** and **PostgreSQL**.
 | `EvidenceSnapshot` | An **immutable** record of the facts at one instant (`captured_at`). | Cannot be updated or destroyed; a SHA-256 `content_digest` fingerprints the frozen facts. An optional `business_key` makes capture idempotent. |
 | `ScoringPolicy` | A **versioned**, declarative rule set (`definition` JSONB) valid over a half-open interval `[effective_from, effective_until)`. | Published intervals may never overlap (DB GiST exclusion constraint). A policy can be *bounded* rather than retired. |
 | `PriorityScore` | The materialised, explainable result of scoring one snapshot with one policy. | DB check constraints enforce component ranges **and** `total = sum(components)`. At most one `current` score per hazard point (partial-unique index). |
+| `QueueSnapshot` / `QueueSnapshotItem` | A **named, immutable** frozen copy of one policy's `current` ranking, captured at build time. | A traversal pinned to a snapshot reads only its frozen items, so concurrent recomputes never cause missed or duplicated rows. |
 
 ### Locked scoring contract
 
@@ -64,6 +65,7 @@ errors to HTTP. This is what makes historical replay and policy versioning safe.
 | **Explanation sum == total, strictly** | Integer components + a DB check constraint `total = rainfall+history+recency+exposure`; the presenter re-asserts the sum at serialization time. |
 | **Blocked road can't zero out risk** | The engine derives risk from the intrinsic total and sets `scheduling_status = "blocked"` independently; scores and risk are untouched. |
 | **Sort ≥ 10k points; stable pagination under continuous equal-score writes** | Keyset (cursor) pagination ordered by `(total_score DESC, hazard_point_id ASC)` on an immutable id, backed by a matching composite index. New equal-scored rows never reshuffle already-returned pages. |
+| **Stable queue-read traversal across recomputes** | A named `QueueSnapshot` freezes a policy's `current` ranking into immutable items. Paginating it walks only the frozen items with the same keyset cursor, so mid-traversal recomputes that move `current` scores cause no missed or duplicated rows. A **new** snapshot re-reads live state to observe updates, and each frozen item still points at its `priority_score_id`, so explanations replay by the v1/v2 boundary. |
 
 ---
 
@@ -166,6 +168,9 @@ Base path: `/api/v1`. Full contract in [`docs/openapi.yaml`](docs/openapi.yaml).
 | `POST /scoring_policies/:id/publish` | **Publish** (409 on overlapping interval) |
 | `PATCH /scoring_policies/:id/bound` | **Bound** a published policy's `effective_until` without retiring it |
 | `GET /scoring_policies/:id/queue` | **Queue**: stable, keyset-paginated ranking (`?limit=&cursor=&scheduling_status=&current=`) |
+| `POST /scoring_policies/:id/queue_snapshots` | **Build** a named, frozen queue-read snapshot pinned to this policy (body: `name`) |
+| `GET /queue_snapshots/:id` | Show a queue-read snapshot (`:id` = numeric id or name) |
+| `GET /queue_snapshots/:id/page` | **Paginate** frozen items — stable across recomputes (`?limit=&cursor=`) |
 | `GET /priority_scores/:id/explanation` | **Explain**: per-component breakdown + policy version/interval + `current` |
 
 ### Example: compute and explain
@@ -207,6 +212,23 @@ curl "http://localhost:3000/api/v1/scoring_policies/1/queue?limit=100"
 #      "next_cursor": "50:2" }   # pass back as ?cursor=50:2
 ```
 
+### Example: stable queue-read snapshot
+
+```bash
+# Freeze v2's current ranking into a named snapshot.
+curl -X POST http://localhost:3000/api/v1/scoring_policies/2/queue_snapshots \
+  -H 'Content-Type: application/json' -d '{"name":"queue-20260802-01"}'
+
+# Page 1 (by name); then keep paging with the returned cursor.
+curl "http://localhost:3000/api/v1/queue_snapshots/queue-20260802-01/page?limit=2"
+# -> { "queue_snapshot": "queue-20260802-01",
+#      "items": [ ... ], "next_cursor": "70:4" }
+
+# Even if scores are recomputed now, resuming the ORIGINAL cursor returns the
+# remaining FROZEN items — no misses, no duplicates:
+curl "http://localhost:3000/api/v1/queue_snapshots/queue-20260802-01/page?limit=2&cursor=70:4"
+```
+
 ---
 
 ## Project layout
@@ -215,7 +237,7 @@ curl "http://localhost:3000/api/v1/scoring_policies/1/queue?limit=100"
 app/
   controllers/api/v1/     # thin HTTP layer, no scoring logic
   models/                 # AR models; callbacks enforce immutability only
-  scoring/scoring/        # PORO domain: engine, materializer, queue, presenter
+  scoring/scoring/        # PORO domain: engine, materializer, queue(+snapshot), presenter
 db/migrate/               # schema + all invariant check constraints
 docs/openapi.yaml         # API contract
 test/                     # engine, model, service and integration tests

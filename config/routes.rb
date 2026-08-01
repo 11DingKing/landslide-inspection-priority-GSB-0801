@@ -20,6 +20,14 @@ Rails.application.routes.draw do
         end
         # Stable, keyset-paginated queue for a policy version.
         get :queue, to: "priorities#queue"
+        # Build a named, frozen queue-read snapshot pinned to this policy.
+        resources :queue_snapshots, only: %i[create]
+      end
+
+      resources :queue_snapshots, only: %i[show] do
+        member do
+          get :page
+        end
       end
 
       resources :priority_scores, only: [] do

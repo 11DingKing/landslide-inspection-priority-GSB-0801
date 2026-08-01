@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_01_000006) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_01_000007) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -70,9 +70,37 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000006) do
     t.check_constraint "history_score >= 0 AND history_score <= 25", name: "priority_scores_history_range"
     t.check_constraint "rainfall_score >= 0 AND rainfall_score <= 40", name: "priority_scores_rainfall_range"
     t.check_constraint "recency_score >= 0 AND recency_score <= 20", name: "priority_scores_recency_range"
-    t.check_constraint "scheduling_status::text = ANY (ARRAY['schedulable'::character varying, 'blocked'::character varying]::text[])", name: "priority_scores_scheduling_status_check"
+    t.check_constraint "scheduling_status::text = ANY (ARRAY['schedulable'::character varying::text, 'blocked'::character varying::text])", name: "priority_scores_scheduling_status_check"
     t.check_constraint "total_score = (rainfall_score + history_score + recency_score + exposure_score)", name: "priority_scores_components_sum_to_total"
     t.check_constraint "total_score >= 0 AND total_score <= 100", name: "priority_scores_total_range"
+  end
+
+  create_table "queue_snapshot_items", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "evidence_snapshot_id", null: false
+    t.bigint "hazard_point_id", null: false
+    t.string "policy_version", null: false
+    t.bigint "priority_score_id", null: false
+    t.bigint "queue_snapshot_id", null: false
+    t.string "risk_level", null: false
+    t.string "scheduling_status", null: false
+    t.integer "total_score", null: false
+    t.datetime "updated_at", null: false
+    t.index ["hazard_point_id"], name: "index_queue_snapshot_items_on_hazard_point_id"
+    t.index ["priority_score_id"], name: "index_queue_snapshot_items_on_priority_score_id"
+    t.index ["queue_snapshot_id", "hazard_point_id"], name: "index_queue_items_on_snapshot_and_point", unique: true
+    t.index ["queue_snapshot_id", "total_score", "hazard_point_id"], name: "index_queue_items_keyset", order: { total_score: :desc }
+    t.index ["queue_snapshot_id"], name: "index_queue_snapshot_items_on_queue_snapshot_id"
+  end
+
+  create_table "queue_snapshots", force: :cascade do |t|
+    t.datetime "built_at", null: false
+    t.datetime "created_at", null: false
+    t.string "name", null: false
+    t.bigint "scoring_policy_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["name"], name: "index_queue_snapshots_on_name", unique: true
+    t.index ["scoring_policy_id"], name: "index_queue_snapshots_on_scoring_policy_id"
   end
 
   create_table "scoring_policies", force: :cascade do |t|
@@ -87,7 +115,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000006) do
     t.index ["status"], name: "index_scoring_policies_on_status"
     t.index ["version"], name: "index_scoring_policies_on_version", unique: true
     t.check_constraint "effective_until IS NULL OR effective_until > effective_from", name: "scoring_policies_interval_order_check"
-    t.check_constraint "status::text = ANY (ARRAY['draft'::character varying, 'published'::character varying, 'archived'::character varying]::text[])", name: "scoring_policies_status_check"
+    t.check_constraint "status::text = ANY (ARRAY['draft'::character varying::text, 'published'::character varying::text, 'archived'::character varying::text])", name: "scoring_policies_status_check"
     t.exclusion_constraint "tsrange(effective_from, effective_until) WITH &&", where: "(status)::text = 'published'::text", using: :gist, name: "scoring_policies_no_overlapping_published"
   end
 
@@ -95,4 +123,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_01_000006) do
   add_foreign_key "priority_scores", "evidence_snapshots"
   add_foreign_key "priority_scores", "hazard_points"
   add_foreign_key "priority_scores", "scoring_policies"
+  add_foreign_key "queue_snapshot_items", "hazard_points"
+  add_foreign_key "queue_snapshot_items", "priority_scores"
+  add_foreign_key "queue_snapshot_items", "queue_snapshots"
+  add_foreign_key "queue_snapshots", "scoring_policies"
 end

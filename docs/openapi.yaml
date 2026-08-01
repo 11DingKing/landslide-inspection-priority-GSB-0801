@@ -291,6 +291,68 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Explanation" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/scoring_policies/{scoring_policy_id}/queue_snapshots:
+    post:
+      summary: Build a named, frozen queue-read snapshot pinned to a policy
+      description: |
+        Freezes the pinned policy's current ranking into an immutable, named
+        snapshot (e.g. "queue-20260802-01"). A traversal of this snapshot is
+        stable: it reads only the frozen items, so concurrent recomputes that
+        move `current` scores never cause missed or duplicated rows. To observe
+        updates, build a NEW snapshot.
+      parameters:
+        - { name: scoring_policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/queue_snapshots/{id}:
+    get:
+      summary: Show a queue-read snapshot (id may be numeric id or the name)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/queue_snapshots/{id}/page:
+    get:
+      summary: Paginate a queue-read snapshot's frozen items (stable keyset)
+      description: |
+        Walks the frozen items ordered by total_score DESC then hazard_point_id
+        ASC. Resuming the original cursor after concurrent recomputes returns the
+        remaining frozen items with no misses and no duplicates.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, maximum: 1000 } }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque cursor "<total_score>:<hazard_point_id>" from a prior page.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FrozenQueuePage" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   responses:
     NotFound:
@@ -409,6 +471,36 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/QueueItem" }
+        next_cursor: { type: string, nullable: true }
+    QueueSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        scoring_policy_id: { type: integer }
+        policy_version: { type: string }
+        built_at: { type: string, format: date-time }
+        item_count: { type: integer }
+    FrozenQueueItem:
+      type: object
+      properties:
+        hazard_point_id: { type: integer }
+        hazard_point_code: { type: string }
+        total_score: { type: integer }
+        risk_level: { type: string }
+        scheduling_status: { type: string }
+        policy_version: { type: string }
+        evidence_snapshot_id: { type: integer }
+        priority_score_id:
+          type: integer
+          description: The score this frozen item points at; use it to fetch the explanation.
+    FrozenQueuePage:
+      type: object
+      properties:
+        queue_snapshot: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/FrozenQueueItem" }
         next_cursor: { type: string, nullable: true }
     Error:
       type: object

@@ -62,6 +62,22 @@ module Scoring
       }
     end
 
+    # A frozen item from a queue-read snapshot. `priority_score_id` is preserved
+    # so the caller can still fetch the original explanation (replayed by the
+    # v1/v2 boundary) even though this item's values are frozen.
+    def frozen_queue_item(item)
+      {
+        hazard_point_id: item.hazard_point_id,
+        hazard_point_code: item.hazard_point.code,
+        total_score: item.total_score,
+        risk_level: item.risk_level,
+        scheduling_status: item.scheduling_status,
+        policy_version: item.policy_version,
+        evidence_snapshot_id: item.evidence_snapshot_id,
+        priority_score_id: item.priority_score_id
+      }
+    end
+
     def component_rows(priority_score)
       [
         { name: "rainfall", score: priority_score.rainfall_score, max: 40 },
