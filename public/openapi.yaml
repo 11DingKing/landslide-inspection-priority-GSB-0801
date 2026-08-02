@@ -12,6 +12,8 @@ info:
     * 分项得分之和严格等于总分。
     * 道路不可达只把 dispatch_status 标记为 blocked，不修改 total_score 与 risk_level。
     * 队列使用 (total_score DESC, id ASC) 游标分页，相同得分下顺序稳定，持续写入不会跳页。
+    * 通过 QueueRead（队列读取快照）把一次遍历固定在指定策略版本与 cutoff_at 上：
+      翻页期间即使有新证据/重算写入，旧遍历也不会漏项或重复，只有新遍历才看得到更新。
 
 servers:
   - url: /api/v1
@@ -23,6 +25,8 @@ tags:
     description: 优先级计算与解释
   - name: queue
     description: 巡查队列检索
+  - name: queue_reads
+    description: 队列读取快照（冻结一次遍历的策略版本与时间边界）
   - name: strategies
     description: 评分策略版本
   - name: snapshots
@@ -183,7 +187,8 @@ paths:
                     type: integer
                     description: 分项之和，严格等于 total_score
                   risk_level: { $ref: "#/components/schemas/RiskLevel" }
-                  dispatch_status: { $ref: "#/components/schemas/DispatchStatus" }
+                  dispatch_status:
+                    { $ref: "#/components/schemas/DispatchStatus" }
                   score_breakdown:
                     type: array
                     items: { $ref: "#/components/schemas/ScoreItem" }
@@ -194,6 +199,11 @@ paths:
     get:
       tags: [queue]
       summary: 巡查优先级队列（稳定游标分页）
+      description: |
+        传入 queue_read 时，整次遍历固定在该读取快照记录的 strategy_version 与 cutoff_at 上：
+        只取 snapshot_at <= cutoff_at 的最新快照，并按该策略版本评分排序。
+        翻页期间即使发生新的证据写入或重算，原 cursor 遍历也不会漏项或重复；
+        不传 queue_read 时读取当前最新快照。
       parameters:
         - name: limit
           in: query
@@ -212,7 +222,11 @@ paths:
         - name: strategy_version
           in: query
           schema: { type: integer }
-          description: 只查看某策略版本下的快照
+          description: 只查看某策略版本下的快照（未传 queue_read 时生效）
+        - name: queue_read
+          in: query
+          schema: { type: string }
+          description: 队列读取快照 business_id；传入后按其冻结的策略版本与 cutoff 遍历
       responses:
         "200":
           description: 分页队列
@@ -230,6 +244,66 @@ paths:
                       total_count: { type: integer }
                       next_cursor: { type: string, nullable: true }
                       limit: { type: integer }
+                      queue_read:
+                        allOf:
+                          - $ref: "#/components/schemas/QueueReadRef"
+                        description: 本次遍历固定的读取快照（传入 queue_read 时返回）
+
+  /queue_reads:
+    post:
+      tags: [queue_reads]
+      summary: 创建队列读取快照
+      description: |
+        在指定时刻（at）解析当时生效的策略版本，并把 strategy_version + cutoff_at 固定下来。
+        business_id 幂等：相同 business_id 重复创建返回同一条记录（不会刷新 cutoff）。
+        随后用 queue_read=<business_id> 调用 /queue 即可在冻结边界上稳定翻页。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [business_id]
+              properties:
+                business_id:
+                  {
+                    type: string,
+                    description: 业务幂等标识，如 queue-20260802-01,
+                  }
+                at:
+                  type: string
+                  format: date-time
+                  description: 队列截止时间（ISO8601），默认当前时间
+                dispatch_status:
+                  $ref: "#/components/schemas/DispatchStatus"
+                include_blocked:
+                  type: boolean
+                  default: true
+                  description: false 时该快照只遍历可调度点
+      responses:
+        "201":
+          description: 已创建读取快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueRead" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /queue_reads/{business_id}:
+    parameters:
+      - name: business_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [queue_reads]
+      summary: 查看队列读取快照
+      responses:
+        "200":
+          description: 读取快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueRead" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /strategies:
     get:
@@ -505,6 +579,33 @@ components:
         snapshot_at: { type: string, format: date-time }
         strategy_version: { type: integer }
         last_inspected_at: { type: string, format: date-time, nullable: true }
+
+    QueueReadRef:
+      type: object
+      properties:
+        business_id: { type: string }
+        strategy_version: { type: integer }
+        cutoff_at: { type: string, format: date-time }
+      description: 队列读取快照的引用信息（回显于队列 meta）
+
+    QueueRead:
+      type: object
+      description: |
+        队列读取快照（不可变）。创建时把当时生效的 strategy_version 与 cutoff_at 固定下来，
+        使一次遍历不受后续 current 评分移动影响。
+      properties:
+        id: { type: integer }
+        business_id: { type: string, description: 业务幂等标识 }
+        strategy_version:
+          type: integer
+          description: 该次遍历固定的评分策略版本
+        cutoff_at:
+          type: string
+          format: date-time
+          description: 该次遍历只读取 snapshot_at <= cutoff_at 的快照
+        dispatch_status:
+          $ref: "#/components/schemas/DispatchStatus"
+        created_at: { type: string, format: date-time }
 
     RuleItem:
       type: object

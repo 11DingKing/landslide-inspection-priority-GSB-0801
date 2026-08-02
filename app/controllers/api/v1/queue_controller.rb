@@ -2,12 +2,14 @@ module Api
   module V1
     class QueueController < BaseController
       def index
+        queue_read = resolve_queue_read
         page = QueueRetriever.call(
           limit: params[:limit],
           cursor: params[:cursor],
           dispatch_status: params[:dispatch_status],
           include_blocked: params[:include_blocked] != "false",
-          strategy_version: params[:strategy_version]
+          strategy_version: params[:strategy_version],
+          queue_read: queue_read
         )
 
         render json: {
@@ -15,12 +17,23 @@ module Api
           meta: {
             total_count: page.total_count,
             next_cursor: page.next_cursor,
-            limit: normalize_limit
+            limit: normalize_limit,
+            queue_read: queue_read && {
+              business_id: queue_read.business_id,
+              strategy_version: queue_read.strategy_version,
+              cutoff_at: queue_read.cutoff_at.iso8601
+            }
           }
         }
       end
 
       private
+
+      def resolve_queue_read
+        return if params[:queue_read].blank?
+
+        QueueRead.find_by!(business_id: params[:queue_read])
+      end
 
       def normalize_limit
         value = params[:limit].to_i

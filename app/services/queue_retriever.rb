@@ -2,17 +2,22 @@ class QueueRetriever
   DEFAULT_LIMIT = 50
   MAX_LIMIT = 200
 
-  Page = Struct.new(:items, :next_cursor, :total_count, keyword_init: true)
+  Page = Struct.new(:items, :next_cursor, :total_count, :queue_read, keyword_init: true)
 
   def self.call(**options)
     new.call(**options)
   end
 
   def call(limit: DEFAULT_LIMIT, cursor: nil, dispatch_status: nil,
-           include_blocked: true, strategy_version: nil)
+           include_blocked: true, strategy_version: nil, queue_read: nil)
     limit = normalize_limit(limit)
-    scope = latest_snapshots_scope(strategy_version)
-    scope = apply_dispatch_filter(scope, dispatch_status, include_blocked)
+
+    effective_version = queue_read&.strategy_version || strategy_version
+    effective_dispatch = queue_read&.dispatch_status || dispatch_status
+    effective_include_blocked = queue_read ? queue_read.dispatch_status.nil? : include_blocked
+
+    scope = latest_snapshots_scope(effective_version, queue_read)
+    scope = apply_dispatch_filter(scope, effective_dispatch, effective_include_blocked)
     scope = apply_cursor(scope, cursor)
 
     items = scope.limit(limit + 1).to_a
@@ -21,10 +26,15 @@ class QueueRetriever
 
     next_cursor = has_more ? encode_cursor(items.last) : nil
 
+    count_scope = latest_snapshots_scope(effective_version, queue_read)
+    count_scope = apply_dispatch_filter(count_scope, effective_dispatch,
+                                        effective_include_blocked)
+
     Page.new(
       items: items,
       next_cursor: next_cursor,
-      total_count: count_scope(dispatch_status, include_blocked, strategy_version)
+      total_count: count_scope.count,
+      queue_read: queue_read
     )
   end
 
@@ -36,12 +46,16 @@ class QueueRetriever
     [value, MAX_LIMIT].min
   end
 
-  def latest_snapshots_scope(strategy_version)
+  def latest_snapshots_scope(strategy_version, queue_read)
     base = EvidenceSnapshot.all
     if strategy_version
       base = base.joins(:scoring_strategy)
                  .where(scoring_strategies: { version: strategy_version,
                                               status: "published" })
+    end
+
+    if queue_read
+      base = base.where("evidence_snapshots.snapshot_at <= ?", queue_read.cutoff_at)
     end
 
     latest = base
@@ -73,11 +87,6 @@ class QueueRetriever
       OR (evidence_snapshots.total_score = :score AND evidence_snapshots.id > :id)
     SQL
     scope.where(where_clause, score: score.to_i, id: id.to_i)
-  end
-
-  def count_scope(dispatch_status, include_blocked, strategy_version)
-    scope = latest_snapshots_scope(strategy_version)
-    apply_dispatch_filter(scope, dispatch_status, include_blocked).count
   end
 
   def encode_cursor(item)

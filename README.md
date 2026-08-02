@@ -4,18 +4,19 @@
 
 ## 核心设计
 
-| 需求 | 实现 |
-| --- | --- |
-| 评分规则可版本化、可重放 | `ScoringStrategy` 保存完整规则 JSON（分项名称、得分范围、阈值），`ScoringEngine` 纯 Ruby 读取规则计算；`PriorityCalculator.replay` 用任意历史策略版本对旧快照重新评分。v1 发布后不 retired，旧快照持续绑定 v1 并可重放 |
-| 分项之和严格等于总分 | `ScoringEngine` 直接以分项求和得到总分；`EvidenceSnapshot` 模型校验 `score_breakdown.sum == total_score` |
-| 策略同一生效时刻唯一 | 已发布策略在 `effective_at` 上有唯一部分索引；并发发布第二个候选返回 409（`StrategyManager::OverlappingStrategy`） |
-| 解析时刻唯一生效版本 | `StrategyResolver.resolve(time)`：`effective_at <= time ORDER BY effective_at DESC, version DESC LIMIT 1` |
-| 道路不可达不降为 0 | 原始 `total_score`/`risk_level` 原样保留，仅把 `dispatch_status` 标为 `blocked` |
-| 不可变证据快照 | `evidence_snapshots` 表上有 PG 触发器，禁止 `UPDATE`/`DELETE`；写入时冻结原始证据与计算结果 |
-| 业务标识幂等/冲突 | `business_id` 唯一索引；同标识同载荷返回已有快照（200），同标识异载荷返回 409；并发提交只留下一条 current 快照 |
-| 控制器/callback 不含评分规则 | 所有评分逻辑在 `app/services/scoring_engine.rb`；模型只有数据校验，控制器只做参数与调用 |
-| 锁定分项名称、得分范围、快照时间 | 分项 `key/name/max` 与 `snapshot_at` 一并写入不可变快照；规则随策略版本固化 |
-| 一万点排序 + 稳定分页 | 游标分页 `ORDER BY total_score DESC, id ASC`，索引 `(dispatch_status, total_score, id)`；同得分以 `id` 为稳定次序，持续写入不跳页 |
+| 需求                             | 实现                                                                                                                                                                                                                   |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 评分规则可版本化、可重放         | `ScoringStrategy` 保存完整规则 JSON（分项名称、得分范围、阈值），`ScoringEngine` 纯 Ruby 读取规则计算；`PriorityCalculator.replay` 用任意历史策略版本对旧快照重新评分。v1 发布后不 retired，旧快照持续绑定 v1 并可重放 |
+| 分项之和严格等于总分             | `ScoringEngine` 直接以分项求和得到总分；`EvidenceSnapshot` 模型校验 `score_breakdown.sum == total_score`                                                                                                               |
+| 策略同一生效时刻唯一             | 已发布策略在 `effective_at` 上有唯一部分索引；并发发布第二个候选返回 409（`StrategyManager::OverlappingStrategy`）                                                                                                     |
+| 解析时刻唯一生效版本             | `StrategyResolver.resolve(time)`：`effective_at <= time ORDER BY effective_at DESC, version DESC LIMIT 1`                                                                                                              |
+| 道路不可达不降为 0               | 原始 `total_score`/`risk_level` 原样保留，仅把 `dispatch_status` 标为 `blocked`                                                                                                                                        |
+| 不可变证据快照                   | `evidence_snapshots` 表上有 PG 触发器，禁止 `UPDATE`/`DELETE`；写入时冻结原始证据与计算结果                                                                                                                            |
+| 业务标识幂等/冲突                | `business_id` 唯一索引；同标识同载荷返回已有快照（200），同标识异载荷返回 409；并发提交只留下一条 current 快照                                                                                                         |
+| 控制器/callback 不含评分规则     | 所有评分逻辑在 `app/services/scoring_engine.rb`；模型只有数据校验，控制器只做参数与调用                                                                                                                                |
+| 锁定分项名称、得分范围、快照时间 | 分项 `key/name/max` 与 `snapshot_at` 一并写入不可变快照；规则随策略版本固化                                                                                                                                            |
+| 一万点排序 + 稳定分页            | 游标分页 `ORDER BY total_score DESC, id ASC`，索引 `(dispatch_status, total_score, id)`；同得分以 `id` 为稳定次序，持续写入不跳页                                                                                      |
+| 遍历冻结在第 2 轮策略与快照上    | `QueueRead` 在创建时固定 `strategy_version` 与 `cutoff_at`；翻页只取 `snapshot_at <= cutoff_at` 的最新快照，中途重算/新写入不影响旧 cursor，不漏不重；新建读取才看得到更新                                             |
 
 ## 技术栈
 
@@ -28,30 +29,31 @@
 
 ```
 app/
-  controllers/api/v1/    # 隐患点、优先级、队列、策略、快照 API
-  models/                # HazardPoint / EvidenceSnapshot / ScoringStrategy
+  controllers/api/v1/    # 隐患点、优先级、队列、队列读取、策略、快照 API
+  models/                # HazardPoint / EvidenceSnapshot / ScoringStrategy / QueueRead
   serializers/           # 纯 Ruby 序列化器
   services/
     scoring_engine.rb        # 唯一的评分规则所在
     strategy_resolver.rb     # 时刻 -> 唯一策略版本
     strategy_manager.rb      # 发布草稿、冲突拒绝
     priority_calculator.rb   # 生成/重放快照
-    queue_retriever.rb       # 稳定游标分页
+    queue_retriever.rb       # 稳定游标分页（支持 queue_read 冻结）
+    queue_read_manager.rb    # 创建/幂等返回队列读取快照
 lib/
   scoring_rules.rb       # v1 默认规则定义
-db/migrate/              # 三张表 + 不可变触发器
-spec/                    # 61 个自动化测试
+db/migrate/              # 四张表 + 不可变触发器
+spec/                    # 76 个自动化测试
 public/openapi.yaml      # OpenAPI 3.0 文档
 ```
 
 ## 分项与评分（v1，满分 100）
 
-| key | 名称 | 满分 | 规则 |
-| --- | --- | --- | --- |
-| `rainfall_24h` | 24小时降水 | 40 | [0,50)→0，[50,100)→10，[100,150)→25，[150,200)→35，≥200→40 |
-| `historical_events` | 历史事件次数 | 25 | 0→0，1→12，≥2→25 |
-| `point_type_risk` | 点位类型基础风险 | 20 | 切坡建房 20 / 道路边坡 12 / 登记隐患 8 |
-| `inspection_recency` | 巡查时效 | 15 | 从未巡查 15 / 当日已巡查 0 / 较早 15 |
+| key                  | 名称             | 满分 | 规则                                                       |
+| -------------------- | ---------------- | ---- | ---------------------------------------------------------- |
+| `rainfall_24h`       | 24小时降水       | 40   | [0,50)→0，[50,100)→10，[100,150)→25，[150,200)→35，≥200→40 |
+| `historical_events`  | 历史事件次数     | 25   | 0→0，1→12，≥2→25                                           |
+| `point_type_risk`    | 点位类型基础风险 | 20   | 切坡建房 20 / 道路边坡 12 / 登记隐患 8                     |
+| `inspection_recency` | 巡查时效         | 15   | 从未巡查 15 / 当日已巡查 0 / 较早 15                       |
 
 风险等级：`[0,30) low`、`[30,60) medium`、`[60,80) high`、`[80,100] critical`。
 
@@ -59,21 +61,21 @@ public/openapi.yaml      # OpenAPI 3.0 文档
 
 ## 策略版本窗口
 
-| 版本 | 生效时刻 | 说明 |
-| --- | --- | --- |
-| v1 | `2026-01-01T00:00:00Z` | 覆盖 `[2026-01-01, 2026-08-02)`；发布后不 retired，旧快照持续绑定并可重放 |
-| v2 | `2026-08-02T00:00:00Z` | 自边界时刻起生效 |
+| 版本 | 生效时刻               | 说明                                                                      |
+| ---- | ---------------------- | ------------------------------------------------------------------------- |
+| v1   | `2026-01-01T00:00:00Z` | 覆盖 `[2026-01-01, 2026-08-02)`；发布后不 retired，旧快照持续绑定并可重放 |
+| v2   | `2026-08-02T00:00:00Z` | 自边界时刻起生效                                                          |
 
 边界时刻 `2026-08-02T00:00:00Z` 及之后解析到 v2，之前解析到 v1。
 
 ## 内置种子点位
 
-| 点位 | 类型 | 24h 降水 | 历史事件 | 道路 | 最近巡查 | 快照时刻 | 绑定版本 | 分数 | 风险 | 调度 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 切坡建房点 A | cut_slope_building | 186mm | 2 | 可达 | 空（从未） | 2026-08-01T12:00Z | v1 | 95 | critical | schedulable |
-| 道路边坡点 B | road_slope | 112mm | 0 | 封闭 | 较早 | 2026-08-01T12:00Z | v1 | 52 | medium | blocked |
-| 登记隐患点 C | registered_hazard | 95mm | 1 | 可达 | 当日（同快照日） | 2026-08-01T12:00Z | v1 | 30 | medium | schedulable |
-| RDS-002 | road_slope | 210mm | 0 | 封闭 | 空（从未） | 2026-08-02T00:00Z（边界） | v2 | 67 | high | blocked |
+| 点位         | 类型               | 24h 降水 | 历史事件 | 道路 | 最近巡查         | 快照时刻                  | 绑定版本 | 分数 | 风险     | 调度        |
+| ------------ | ------------------ | -------- | -------- | ---- | ---------------- | ------------------------- | -------- | ---- | -------- | ----------- |
+| 切坡建房点 A | cut_slope_building | 186mm    | 2        | 可达 | 空（从未）       | 2026-08-01T12:00Z         | v1       | 95   | critical | schedulable |
+| 道路边坡点 B | road_slope         | 112mm    | 0        | 封闭 | 较早             | 2026-08-01T12:00Z         | v1       | 52   | medium   | blocked     |
+| 登记隐患点 C | registered_hazard  | 95mm     | 1        | 可达 | 当日（同快照日） | 2026-08-01T12:00Z         | v1       | 30   | medium   | schedulable |
+| RDS-002      | road_slope         | 210mm    | 0        | 封闭 | 空（从未）       | 2026-08-02T00:00Z（边界） | v2       | 67   | high     | blocked     |
 
 RDS-002 快照业务标识为 `evidence-rds-002-20260802-0000`；道路封闭仅使调度状态为 `blocked`，风险等级仍为 `high`。
 
@@ -81,10 +83,22 @@ RDS-002 快照业务标识为 `evidence-rds-002-20260802-0000`；道路封闭仅
 
 计算优先级时传 `business_id`：
 
-* 相同 `business_id` + 相同证据载荷 → 返回已有快照，HTTP 200（幂等）。
-* 相同 `business_id` + 不同证据载荷 → HTTP 409（冲突）。
-* 并发提交相同 `business_id` → 数据库唯一索引保证只留下一条 current 快照，其余返回同一条。
-* 比对的载荷包含：降水量、历史事件次数、点位类型、道路状态、最近巡查时间、快照时刻、策略版本。
+- 相同 `business_id` + 相同证据载荷 → 返回已有快照，HTTP 200（幂等）。
+- 相同 `business_id` + 不同证据载荷 → HTTP 409（冲突）。
+- 并发提交相同 `business_id` → 数据库唯一索引保证只留下一条 current 快照，其余返回同一条。
+- 比对的载荷包含：降水量、历史事件次数、点位类型、道路状态、最近巡查时间、快照时刻、策略版本。
+
+## 队列读取快照（冻结一次遍历）
+
+普通 `/queue` 读的是"当前最新"快照。如果在翻页过程中有新证据写入或重算，current 评分会移动，可能造成漏项或重复。队列读取快照 `QueueRead` 解决这个问题：
+
+1. 在某个时刻创建读取快照，系统解析当时生效的策略版本，并把 `strategy_version` + `cutoff_at` 固定下来（如 `queue-20260802-01` 固定在 v2、`2026-08-02T01:00:00Z`）。
+2. 用 `queue_read=<business_id>` 翻页时，子查询只取 `snapshot_at <= cutoff_at` 的每个隐患点最新快照，并按固定的策略版本排序。
+3. 即使翻页中途为某些点写入新证据并重算，原 cursor 继续遍历时仍落在冻结集上，不会漏项或重复；`total_count` 也保持不变。
+4. 只有重新创建一个读取快照（新的 cutoff），新遍历才看得到更新后的结果。
+5. 旧评分解释不受影响：v1 快照仍绑定 v1、v2 快照仍绑定 v2，可按 v1/v2 边界继续重放。
+
+读取快照本身不可变，`business_id` 幂等（重复创建返回同一条，不会刷新 cutoff）。
 
 ## 安装
 
@@ -132,7 +146,8 @@ bundle exec rspec
 - 持续写入相同得分行时游标分页顺序稳定、不跳页
 - v1/v2 边界时刻版本解析与快照绑定
 - 业务标识幂等：同载荷 200、异载荷 409、并发只留一条
-- API 请求规格（计算、队列、解释、发布冲突、重放）
+- 队列读取快照：冻结在 v2 + cutoff，中途重算不漏不重，新读取才见更新，旧 v1/v2 解释仍可重放
+- API 请求规格（计算、队列、队列读取、解释、发布冲突、重放）
 
 ## 常用 API
 
@@ -156,6 +171,25 @@ curl 'http://127.0.0.1:3000/api/v1/queue?limit=50'
 curl 'http://127.0.0.1:3000/api/v1/queue?limit=50&cursor=...'
 # 仅可调度点
 curl 'http://127.0.0.1:3000/api/v1/queue?include_blocked=false'
+```
+
+### 冻结遍历（队列读取快照）
+
+```bash
+# 1) 在 2026-08-02T01:00Z 创建读取快照，固定当时的策略版本（v2）与 cutoff
+curl -X POST http://127.0.0.1:3000/api/v1/queue_reads \
+  -H 'Content-Type: application/json' \
+  -d '{"business_id":"queue-20260802-01","at":"2026-08-02T01:00:00Z"}'
+
+# 2) 第一页（之后即便重算/写入新证据，本遍历仍冻结在 v2 + cutoff）
+curl 'http://127.0.0.1:3000/api/v1/queue?queue_read=queue-20260802-01&limit=2'
+# 用返回的 meta.next_cursor 继续翻页
+curl 'http://127.0.0.1:3000/api/v1/queue?queue_read=queue-20260802-01&limit=2&cursor=...'
+
+# 3) 新建一个读取快照，新遍历才看得到更新后的评分
+curl -X POST http://127.0.0.1:3000/api/v1/queue_reads \
+  -H 'Content-Type: application/json' \
+  -d '{"business_id":"queue-20260802-02","at":"2026-08-02T02:00:00Z"}'
 ```
 
 ### 解释
@@ -189,3 +223,4 @@ curl -X POST http://127.0.0.1:3000/api/v1/snapshots/1/replay \
 - `hazard_points`：隐患点静态属性（类型、历史事件次数、最近巡查时间、道路状态、最新降水）。
 - `scoring_strategies`：版本号、生效时刻、状态（draft/published）、完整规则 JSON；已发布后规则不可改。
 - `evidence_snapshots`：每次计算生成一行不可变记录，包含证据原值、策略版本、总分、分项、风险等级、调度状态与解释。
+- `queue_reads`：队列读取快照（不可变），保存 `business_id`、冻结的 `strategy_version`、`cutoff_at` 与可选 `dispatch_status`，用于在持续写入下稳定翻页。

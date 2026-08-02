@@ -122,6 +122,40 @@ ALTER SEQUENCE public.hazard_points_id_seq OWNED BY public.hazard_points.id;
 
 
 --
+-- Name: queue_reads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.queue_reads (
+    id bigint NOT NULL,
+    business_id character varying NOT NULL,
+    strategy_version integer NOT NULL,
+    cutoff_at timestamp(6) without time zone NOT NULL,
+    dispatch_status character varying,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL
+);
+
+
+--
+-- Name: queue_reads_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.queue_reads_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: queue_reads_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.queue_reads_id_seq OWNED BY public.queue_reads.id;
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -181,6 +215,13 @@ ALTER TABLE ONLY public.hazard_points ALTER COLUMN id SET DEFAULT nextval('publi
 
 
 --
+-- Name: queue_reads id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_reads ALTER COLUMN id SET DEFAULT nextval('public.queue_reads_id_seq'::regclass);
+
+
+--
 -- Name: scoring_strategies id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -209,6 +250,14 @@ ALTER TABLE ONLY public.evidence_snapshots
 
 ALTER TABLE ONLY public.hazard_points
     ADD CONSTRAINT hazard_points_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: queue_reads queue_reads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.queue_reads
+    ADD CONSTRAINT queue_reads_pkey PRIMARY KEY (id);
 
 
 --
@@ -270,6 +319,13 @@ CREATE INDEX index_evidence_snapshots_on_snapshot_at ON public.evidence_snapshot
 
 
 --
+-- Name: index_evidence_snapshots_on_strategy_and_snapshot_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_evidence_snapshots_on_strategy_and_snapshot_at ON public.evidence_snapshots USING btree (scoring_strategy_id, snapshot_at);
+
+
+--
 -- Name: index_evidence_snapshots_on_total_score_and_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -302,6 +358,20 @@ CREATE INDEX index_hazard_points_on_point_type ON public.hazard_points USING btr
 --
 
 CREATE INDEX index_hazard_points_on_road_accessible ON public.hazard_points USING btree (road_accessible);
+
+
+--
+-- Name: index_queue_reads_on_business_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_queue_reads_on_business_id ON public.queue_reads USING btree (business_id);
+
+
+--
+-- Name: index_queue_reads_on_cutoff_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_queue_reads_on_cutoff_at ON public.queue_reads USING btree (cutoff_at);
 
 
 --
@@ -362,6 +432,7 @@ ALTER TABLE ONLY public.evidence_snapshots
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20260802000006'),
 ('20260802000005'),
 ('20260802000004'),
 ('20260802000003'),

@@ -28,6 +28,8 @@ Rails.application.routes.draw do
       end
 
       get "queue", to: "queue#index"
+
+      resources :queue_reads, only: [:create, :show], param: :business_id
     end
   end
 end

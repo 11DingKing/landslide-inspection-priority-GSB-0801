@@ -58,7 +58,8 @@ RSpec.configure do |config|
     conn.execute(
       "TRUNCATE TABLE #{conn.quote_table_name('evidence_snapshots')}, " \
       "#{conn.quote_table_name('hazard_points')}, " \
-      "#{conn.quote_table_name('scoring_strategies')} RESTART IDENTITY CASCADE"
+      "#{conn.quote_table_name('scoring_strategies')}, " \
+      "#{conn.quote_table_name('queue_reads')} RESTART IDENTITY CASCADE"
     )
   end
 
@@ -67,7 +68,8 @@ RSpec.configure do |config|
     conn.execute(
       "TRUNCATE TABLE #{conn.quote_table_name('evidence_snapshots')}, " \
       "#{conn.quote_table_name('hazard_points')}, " \
-      "#{conn.quote_table_name('scoring_strategies')} RESTART IDENTITY CASCADE"
+      "#{conn.quote_table_name('scoring_strategies')}, " \
+      "#{conn.quote_table_name('queue_reads')} RESTART IDENTITY CASCADE"
     )
   end
 
