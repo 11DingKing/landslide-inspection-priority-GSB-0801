@@ -1,12 +1,17 @@
 class PriorityCalculator
   class Error < StandardError; end
   class MissingStrategy < Error; end
+  class PayloadConflict < Error; end
+
+  Outcome = Struct.new(:snapshot, :created, keyword_init: true)
 
   def self.call(hazard_point, at: Time.current, strategy: nil,
-                strategy_version: nil, rainfall_24h_mm: nil)
+                strategy_version: nil, rainfall_24h_mm: nil,
+                business_id: nil)
     new(hazard_point).calculate(at: at, strategy: strategy,
                                 strategy_version: strategy_version,
-                                rainfall_24h_mm: rainfall_24h_mm)
+                                rainfall_24h_mm: rainfall_24h_mm,
+                                business_id: business_id)
   end
 
   def initialize(hazard_point)
@@ -14,7 +19,7 @@ class PriorityCalculator
   end
 
   def calculate(at: Time.current, strategy: nil, strategy_version: nil,
-                rainfall_24h_mm: nil)
+                rainfall_24h_mm: nil, business_id: nil)
     time = at.respond_to?(:to_time) ? at.to_time.utc : Time.current.utc
     resolved = resolve_strategy(strategy, strategy_version, time)
     engine = ScoringEngine.new(resolved)
@@ -22,7 +27,22 @@ class PriorityCalculator
     evidence = build_evidence(time, rainfall_24h_mm)
     result = engine.score(evidence)
 
-    create_snapshot!(time, resolved, evidence, result)
+    if business_id.present?
+      existing = EvidenceSnapshot.find_by(business_id: business_id)
+      if existing
+        ensure_same_payload!(existing, evidence, resolved.version)
+        return Outcome.new(snapshot: existing, created: false)
+      end
+    end
+
+    snapshot = insert_snapshot(time, resolved, evidence, result, business_id)
+    Outcome.new(snapshot: snapshot, created: true)
+  rescue ActiveRecord::RecordNotUnique => e
+    raise unless e.message.include?("index_evidence_snapshots_on_business_id_unique")
+
+    existing = EvidenceSnapshot.find_by!(business_id: business_id)
+    ensure_same_payload!(existing, evidence, resolved.version)
+    Outcome.new(snapshot: existing, created: false)
   end
 
   def self.replay(snapshot, strategy_version:)
@@ -41,7 +61,7 @@ class PriorityCalculator
       snapshot_at: snapshot.snapshot_at
     }
     result = engine.score(evidence)
-    create_snapshot!(snapshot.snapshot_at, strategy, evidence, result)
+    insert_snapshot(snapshot.snapshot_at, strategy, evidence, result, nil)
   end
 
   private
@@ -67,12 +87,19 @@ class PriorityCalculator
     }
   end
 
-  def create_snapshot!(time, strategy, evidence, result)
-    # Use insert! to bypass the after_initialize readonly guard on new records,
-    # while still relying on DB constraints and the immutable trigger.
+  def ensure_same_payload!(existing, evidence, version)
+    return if existing.same_payload?(evidence, version)
+
+    raise PayloadConflict,
+          "snapshot with business_id #{existing.business_id} already exists " \
+          "with different evidence"
+  end
+
+  def insert_snapshot(time, strategy, evidence, result, business_id)
     EvidenceSnapshot.create!(
       hazard_point_id: @hazard_point.id,
       scoring_strategy_id: strategy.id,
+      business_id: business_id,
       snapshot_at: time,
       rainfall_24h_mm: evidence[:rainfall_24h_mm],
       historical_event_count: evidence[:historical_event_count],

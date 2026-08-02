@@ -59,7 +59,8 @@ CREATE TABLE public.evidence_snapshots (
     score_breakdown jsonb NOT NULL,
     explanation jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp(6) without time zone NOT NULL,
-    updated_at timestamp(6) without time zone NOT NULL
+    updated_at timestamp(6) without time zone NOT NULL,
+    business_id character varying
 );
 
 
@@ -234,6 +235,13 @@ CREATE INDEX index_evidence_snapshots_for_queue ON public.evidence_snapshots USI
 
 
 --
+-- Name: index_evidence_snapshots_on_business_id_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_evidence_snapshots_on_business_id_unique ON public.evidence_snapshots USING btree (business_id) WHERE (business_id IS NOT NULL);
+
+
+--
 -- Name: index_evidence_snapshots_on_hazard_point_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -354,6 +362,7 @@ ALTER TABLE ONLY public.evidence_snapshots
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
+('20260802000005'),
 ('20260802000004'),
 ('20260802000003'),
 ('20260802000002'),

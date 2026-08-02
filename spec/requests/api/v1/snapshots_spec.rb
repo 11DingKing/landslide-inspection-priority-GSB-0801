@@ -6,7 +6,7 @@ RSpec.describe "Api::V1::Snapshots", type: :request do
   describe "GET /api/v1/snapshots/:id" do
     it "returns an immutable snapshot with breakdown and version" do
       point = create(:hazard_point, :cut_slope_building, last_inspected_at: nil)
-      snapshot = PriorityCalculator.call(point)
+      snapshot = PriorityCalculator.call(point).snapshot
 
       get "/api/v1/snapshots/#{snapshot.id}"
       expect(response).to have_http_status(:ok)
@@ -20,7 +20,7 @@ RSpec.describe "Api::V1::Snapshots", type: :request do
   describe "POST /api/v1/snapshots/:id/replay" do
     it "recomputes the snapshot under a different strategy version" do
       point = create(:hazard_point, :cut_slope_building, last_inspected_at: nil)
-      original = PriorityCalculator.call(point, strategy_version: v1.version)
+      original = PriorityCalculator.call(point, strategy_version: v1.version).snapshot
 
       v2_rules = ScoringRules::V1.rules.dup
       v2_rules["items"] = v2_rules["items"].map do |item|

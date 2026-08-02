@@ -6,12 +6,13 @@
 
 | 需求 | 实现 |
 | --- | --- |
-| 评分规则可版本化、可重放 | `ScoringStrategy` 保存完整规则 JSON（分项名称、得分范围、阈值），`ScoringEngine` 纯 Ruby 读取规则计算；`PriorityCalculator.replay` 用任意历史策略版本对旧快照重新评分 |
+| 评分规则可版本化、可重放 | `ScoringStrategy` 保存完整规则 JSON（分项名称、得分范围、阈值），`ScoringEngine` 纯 Ruby 读取规则计算；`PriorityCalculator.replay` 用任意历史策略版本对旧快照重新评分。v1 发布后不 retired，旧快照持续绑定 v1 并可重放 |
 | 分项之和严格等于总分 | `ScoringEngine` 直接以分项求和得到总分；`EvidenceSnapshot` 模型校验 `score_breakdown.sum == total_score` |
 | 策略同一生效时刻唯一 | 已发布策略在 `effective_at` 上有唯一部分索引；并发发布第二个候选返回 409（`StrategyManager::OverlappingStrategy`） |
 | 解析时刻唯一生效版本 | `StrategyResolver.resolve(time)`：`effective_at <= time ORDER BY effective_at DESC, version DESC LIMIT 1` |
 | 道路不可达不降为 0 | 原始 `total_score`/`risk_level` 原样保留，仅把 `dispatch_status` 标为 `blocked` |
 | 不可变证据快照 | `evidence_snapshots` 表上有 PG 触发器，禁止 `UPDATE`/`DELETE`；写入时冻结原始证据与计算结果 |
+| 业务标识幂等/冲突 | `business_id` 唯一索引；同标识同载荷返回已有快照（200），同标识异载荷返回 409；并发提交只留下一条 current 快照 |
 | 控制器/callback 不含评分规则 | 所有评分逻辑在 `app/services/scoring_engine.rb`；模型只有数据校验，控制器只做参数与调用 |
 | 锁定分项名称、得分范围、快照时间 | 分项 `key/name/max` 与 `snapshot_at` 一并写入不可变快照；规则随策略版本固化 |
 | 一万点排序 + 稳定分页 | 游标分页 `ORDER BY total_score DESC, id ASC`，索引 `(dispatch_status, total_score, id)`；同得分以 `id` 为稳定次序，持续写入不跳页 |
@@ -56,13 +57,34 @@ public/openapi.yaml      # OpenAPI 3.0 文档
 
 调度状态：道路可达为 `schedulable`，道路封闭为 `blocked`（不影响分数与风险等级）。
 
+## 策略版本窗口
+
+| 版本 | 生效时刻 | 说明 |
+| --- | --- | --- |
+| v1 | `2026-01-01T00:00:00Z` | 覆盖 `[2026-01-01, 2026-08-02)`；发布后不 retired，旧快照持续绑定并可重放 |
+| v2 | `2026-08-02T00:00:00Z` | 自边界时刻起生效 |
+
+边界时刻 `2026-08-02T00:00:00Z` 及之后解析到 v2，之前解析到 v1。
+
 ## 内置种子点位
 
-| 点位 | 类型 | 24h 降水 | 历史事件 | 道路 | 最近巡查 | 分数 | 风险 | 调度 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 切坡建房点 A | cut_slope_building | 186mm | 2 | 可达 | 空（从未） | 95 | critical | schedulable |
-| 道路边坡点 B | road_slope | 112mm | 0 | 封闭 | 较早 | 52 | medium | blocked |
-| 登记隐患点 C | registered_hazard | 95mm | 1 | 可达 | 当日 | 30 | medium | schedulable |
+| 点位 | 类型 | 24h 降水 | 历史事件 | 道路 | 最近巡查 | 快照时刻 | 绑定版本 | 分数 | 风险 | 调度 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 切坡建房点 A | cut_slope_building | 186mm | 2 | 可达 | 空（从未） | 2026-08-01T12:00Z | v1 | 95 | critical | schedulable |
+| 道路边坡点 B | road_slope | 112mm | 0 | 封闭 | 较早 | 2026-08-01T12:00Z | v1 | 52 | medium | blocked |
+| 登记隐患点 C | registered_hazard | 95mm | 1 | 可达 | 当日（同快照日） | 2026-08-01T12:00Z | v1 | 30 | medium | schedulable |
+| RDS-002 | road_slope | 210mm | 0 | 封闭 | 空（从未） | 2026-08-02T00:00Z（边界） | v2 | 67 | high | blocked |
+
+RDS-002 快照业务标识为 `evidence-rds-002-20260802-0000`；道路封闭仅使调度状态为 `blocked`，风险等级仍为 `high`。
+
+## 业务标识与幂等
+
+计算优先级时传 `business_id`：
+
+* 相同 `business_id` + 相同证据载荷 → 返回已有快照，HTTP 200（幂等）。
+* 相同 `business_id` + 不同证据载荷 → HTTP 409（冲突）。
+* 并发提交相同 `business_id` → 数据库唯一索引保证只留下一条 current 快照，其余返回同一条。
+* 比对的载荷包含：降水量、历史事件次数、点位类型、道路状态、最近巡查时间、快照时刻、策略版本。
 
 ## 安装
 
@@ -108,6 +130,8 @@ bundle exec rspec
 - 快照不可变（DB 触发器阻止 UPDATE/DELETE）
 - 一万个点位排序、游标分页无重复无遗漏、5 秒内完成
 - 持续写入相同得分行时游标分页顺序稳定、不跳页
+- v1/v2 边界时刻版本解析与快照绑定
+- 业务标识幂等：同载荷 200、异载荷 409、并发只留一条
 - API 请求规格（计算、队列、解释、发布冲突、重放）
 
 ## 常用 API
@@ -117,10 +141,12 @@ bundle exec rspec
 ### 计算优先级
 
 ```bash
-curl -X POST http://127.0.0.1:3000/api/v1/hazard_points/1/calculate_priority
+curl -X POST http://127.0.0.1:3000/api/v1/hazard_points/4/calculate_priority \
+  -H 'Content-Type: application/json' \
+  -d '{"at":"2026-08-02T00:00:00Z","rainfall_24h_mm":210.0,"business_id":"evidence-rds-002-20260802-0000"}'
 ```
 
-返回带 `scoring.score_breakdown`、`scoring.strategy_version`、`explanation` 的不可变快照。可用 JSON body 传 `at`、`strategy_version`、`rainfall_24h_mm`。
+返回带 `scoring.score_breakdown`、`scoring.strategy_version`、`explanation` 的不可变快照。可用 JSON body 传 `at`、`strategy_version`、`rainfall_24h_mm`、`business_id`。提供 `business_id` 时：同载荷重复提交返回 200，不同载荷返回 409。
 
 ### 巡查队列
 

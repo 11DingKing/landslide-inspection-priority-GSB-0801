@@ -3,6 +3,7 @@ class SnapshotSerializer
     data = {
       id: snapshot.id,
       hazard_point_id: snapshot.hazard_point_id,
+      business_id: snapshot.business_id,
       snapshot_at: snapshot.snapshot_at.iso8601,
       evidence: {
         rainfall_24h_mm: snapshot.rainfall_24h_mm.to_f,

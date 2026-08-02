@@ -18,15 +18,17 @@ module Api
         at = parse_time(params[:at]) || Time.current
         strategy_version = params[:strategy_version]
         rainfall = params[:rainfall_24h_mm]
+        business_id = params[:business_id]
 
-        snapshot = PriorityCalculator.call(
+        outcome = PriorityCalculator.call(
           @hazard_point,
           at: at,
           strategy_version: strategy_version,
-          rainfall_24h_mm: rainfall
+          rainfall_24h_mm: rainfall,
+          business_id: business_id
         )
-        render json: SnapshotSerializer.one(snapshot, include_hazard: false),
-               status: :created
+        render json: SnapshotSerializer.one(outcome.snapshot, include_hazard: false),
+               status: outcome.created ? :created : :ok
       end
 
       def explanation

@@ -46,7 +46,7 @@ RSpec.describe "Api::V1::Priorities", type: :request do
   describe "GET /api/v1/hazard_points/:id/priority" do
     it "returns the latest snapshot" do
       point = create(:hazard_point, :registered_hazard, last_inspected_at: Time.current)
-      snapshot = PriorityCalculator.call(point)
+      snapshot = PriorityCalculator.call(point).snapshot
 
       get "/api/v1/hazard_points/#{point.id}/priority"
       expect(response).to have_http_status(:ok)
@@ -63,7 +63,7 @@ RSpec.describe "Api::V1::Priorities", type: :request do
   describe "GET /api/v1/hazard_points/:id/priority_explanation" do
     it "returns the explanation whose item sum equals total" do
       point = create(:hazard_point, :cut_slope_building, last_inspected_at: nil)
-      snapshot = PriorityCalculator.call(point)
+      snapshot = PriorityCalculator.call(point).snapshot
 
       get "/api/v1/hazard_points/#{point.id}/priority_explanation"
       body = JSON.parse(response.body)

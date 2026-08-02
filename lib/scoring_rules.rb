@@ -63,9 +63,19 @@ module ScoringRules
     end
   end
 
+  # v2 marks the 2026-08-02T00:00:00Z cutover. Scoring items are unchanged;
+  # the new version exists so snapshots at/after the boundary bind to v2 while
+  # earlier snapshots remain bound to v1 and stay replayable.
+  module V2
+    def self.rules
+      V1.rules.deep_dup
+    end
+  end
+
   def self.version(version = 1)
     case version
     when 1 then V1.rules
+    when 2 then V2.rules
     else V1.rules
     end
   end

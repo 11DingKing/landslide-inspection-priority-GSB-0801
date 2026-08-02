@@ -18,6 +18,7 @@ class EvidenceSnapshot < ApplicationRecord
   validates :risk_level, presence: true, inclusion: { in: RISK_LEVELS }
   validates :dispatch_status, presence: true, inclusion: { in: DISPATCH_STATUSES }
   validates :score_breakdown, presence: true
+  validates :business_id, uniqueness: true, allow_nil: true
   validate :breakdown_is_well_formed
   validate :breakdown_sum_equals_total
 
@@ -33,6 +34,32 @@ class EvidenceSnapshot < ApplicationRecord
 
   def explanation_text
     explanation.is_a?(Hash) ? explanation["summary"] : explanation
+  end
+
+  def payload_fingerprint
+    {
+      hazard_point_id: hazard_point_id,
+      rainfall_24h_mm: rainfall_24h_mm.to_f.round(1),
+      historical_event_count: historical_event_count,
+      point_type: point_type,
+      road_status: road_status,
+      last_inspected_at: last_inspected_at&.utc&.iso8601,
+      snapshot_at: snapshot_at.utc.iso8601,
+      strategy_version: strategy_version
+    }
+  end
+
+  def same_payload?(evidence, strategy_version)
+    payload_fingerprint == {
+      hazard_point_id: hazard_point_id,
+      rainfall_24h_mm: evidence[:rainfall_24h_mm].to_f.round(1),
+      historical_event_count: evidence[:historical_event_count],
+      point_type: evidence[:point_type],
+      road_status: evidence[:road_status],
+      last_inspected_at: evidence[:last_inspected_at]&.utc&.iso8601,
+      snapshot_at: evidence[:snapshot_at].utc.iso8601,
+      strategy_version: strategy_version
+    }
   end
 
   private

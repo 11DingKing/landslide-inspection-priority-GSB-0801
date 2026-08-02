@@ -6,6 +6,7 @@ module Api
       rescue_from ActionController::ParameterMissing, with: :bad_request
       rescue_from ScoringEngine::InvalidRules, with: :unprocessable
       rescue_from PriorityCalculator::MissingStrategy, with: :conflict
+      rescue_from PriorityCalculator::PayloadConflict, with: :conflict
       rescue_from StrategyManager::OverlappingStrategy, with: :conflict
       rescue_from StrategyResolver::NoActiveStrategy, with: :conflict
       rescue_from QueueRetriever::Error, with: :bad_request

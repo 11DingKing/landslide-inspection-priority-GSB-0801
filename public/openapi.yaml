@@ -103,6 +103,9 @@ paths:
       description: |
         使用当前生效（或指定）的评分策略，读取隐患点当前证据生成快照。
         可通过 rainfall_24h_mm 覆盖本次降水量（不会修改隐患点）。
+
+        提供 business_id 时启用幂等：相同 business_id + 相同载荷返回已有快照（200），
+        相同 business_id + 不同载荷返回 409；并发提交相同 business_id 只留下一条快照。
       requestBody:
         content:
           application/json:
@@ -119,15 +122,26 @@ paths:
                 rainfall_24h_mm:
                   type: number
                   description: 覆盖本次 24 小时降水量
+                business_id:
+                  type: string
+                  description: 业务幂等标识；同标识同载荷幂等、异载荷冲突
       responses:
         "201":
-          description: 已生成快照
+          description: 已生成新快照
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "200":
+          description: 命中幂等，返回已存在的相同快照
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: 无生效策略
+          description: 无生效策略，或 business_id 已存在但载荷不同
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /hazard_points/{id}/priority:
     parameters:
@@ -446,6 +460,10 @@ components:
       properties:
         id: { type: integer }
         hazard_point_id: { type: integer }
+        business_id:
+          type: string
+          nullable: true
+          description: 业务幂等标识；同标识同载荷幂等、异载荷冲突
         snapshot_at:
           type: string
           format: date-time
