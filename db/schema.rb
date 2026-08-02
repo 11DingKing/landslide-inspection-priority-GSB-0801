@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_02_214330) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_02_231236) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -22,6 +22,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_214330) do
   create_enum "strategy_status", ["draft", "published", "retired"]
 
   create_table "evidence_snapshots", force: :cascade do |t|
+    t.string "business_key"
     t.datetime "created_at", null: false
     t.bigint "hazard_point_id", null: false
     t.integer "historical_event_count", default: 0, null: false
@@ -33,6 +34,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_214330) do
     t.datetime "snapshot_time", precision: nil, null: false
     t.text "source_note"
     t.datetime "updated_at", null: false
+    t.index ["business_key"], name: "index_evidence_snapshots_on_business_key", unique: true
     t.index ["hazard_point_id", "snapshot_time"], name: "idx_evidence_snapshots_point_time"
     t.index ["hazard_point_id"], name: "index_evidence_snapshots_on_hazard_point_id"
     t.index ["snapshot_time"], name: "index_evidence_snapshots_on_snapshot_time"
@@ -59,6 +61,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_214330) do
     t.bigint "evidence_snapshot_id", null: false
     t.jsonb "explanation", default: {}, null: false
     t.bigint "hazard_point_id", null: false
+    t.string "kind", default: "current", null: false
     t.enum "risk_level", null: false, enum_type: "risk_level"
     t.boolean "road_accessible", default: true, null: false
     t.bigint "scoring_strategy_id", null: false
@@ -66,9 +69,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_214330) do
     t.integer "total_score", null: false
     t.datetime "updated_at", null: false
     t.index ["dispatch_status"], name: "index_priority_scores_on_dispatch_status"
-    t.index ["evidence_snapshot_id", "scoring_strategy_id"], name: "idx_priority_scores_snapshot_strategy_unique", unique: true
+    t.index ["evidence_snapshot_id", "scoring_strategy_id"], name: "idx_priority_scores_snapshot_strategy", unique: true
+    t.index ["evidence_snapshot_id"], name: "idx_priority_scores_one_current_per_snapshot", unique: true, where: "((kind)::text = 'current'::text)"
     t.index ["evidence_snapshot_id"], name: "index_priority_scores_on_evidence_snapshot_id"
     t.index ["hazard_point_id"], name: "index_priority_scores_on_hazard_point_id"
+    t.index ["kind"], name: "index_priority_scores_on_kind"
     t.index ["risk_level"], name: "index_priority_scores_on_risk_level"
     t.index ["scoring_strategy_id"], name: "index_priority_scores_on_scoring_strategy_id"
     t.index ["total_score", "hazard_point_id"], name: "idx_priority_scores_queue_order"

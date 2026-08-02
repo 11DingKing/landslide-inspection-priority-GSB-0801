@@ -13,6 +13,7 @@ class CreatePriorityScores < ActiveRecord::Migration[8.1]
       t.enum :risk_level, enum_type: :risk_level, null: false
       t.enum :dispatch_status, enum_type: :dispatch_status, null: false, default: "available"
       t.boolean :road_accessible, null: false, default: true
+      t.string :kind, null: false, default: "current"
 
       # Locked component names, ranges and values so that future rule changes
       # cannot silently rewrite historical explanations.
@@ -25,13 +26,21 @@ class CreatePriorityScores < ActiveRecord::Migration[8.1]
     add_index :priority_scores,
               %i[evidence_snapshot_id scoring_strategy_id],
               unique: true,
-              name: "idx_priority_scores_snapshot_strategy_unique"
+              name: "idx_priority_scores_snapshot_strategy"
 
     add_index :priority_scores,
               %i[total_score hazard_point_id],
               name: "idx_priority_scores_queue_order"
 
+    # Each evidence snapshot has exactly one "current" score; replays against
+    # other strategies are stored as kind='replay' rows and do not conflict.
+    add_index :priority_scores, :evidence_snapshot_id,
+              unique: true,
+              where: "kind = 'current'",
+              name: "idx_priority_scores_one_current_per_snapshot"
+
     add_index :priority_scores, :risk_level
     add_index :priority_scores, :dispatch_status
+    add_index :priority_scores, :kind
   end
 end

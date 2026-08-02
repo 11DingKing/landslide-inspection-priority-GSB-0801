@@ -2,22 +2,30 @@ module Scoring
   # Application service that turns an EvidenceSnapshot (+ optional strategy
   # override) into a persisted PriorityScore.
   #
-  # Concurrency / idempotency:
-  #   * The (evidence_snapshot_id, scoring_strategy_id) pair has a UNIQUE
-  #     database index.
-  #   * We INSERT ... ON CONFLICT DO NOTHING so that two processes computing
-  #     the same snapshot at the same time both end up with the same row
-  #     and identical component breakdown (the pure Calculator guarantees
-  #     identical output for identical inputs).
+  # Two kinds of scores are supported:
   #
-  # Replay:
-  #   * Pass an explicit `strategy:` to score an old snapshot with any
-  #     historical strategy. The resulting PriorityScore is stored alongside
-  #     "current" scores and never overwritten.
+  #   * kind = "current" (default when no explicit strategy is given)
+  #       The score produced by the strategy effective at the snapshot's time.
+  #       The partial unique index idx_priority_scores_one_current_per_snapshot
+  #       guarantees at most one current row per evidence_snapshot_id. This is
+  #       what makes "concurrent computation leaves one current score" work.
+  #
+  #   * kind = "replay" (when an explicit strategy: is passed)
+  #       The score produced by an arbitrary historical / future strategy.
+  #       Replay rows never collide with current rows, and each (snapshot,
+  #       strategy) pair is unique via idx_priority_scores_snapshot_strategy.
+  #
+  # Replay design:
   #   * The snapshot_time and component breakdown are copied into the row so
-  #     that even if the EvidenceSnapshot is later soft-edited, the historical
+  #     that even if the EvidenceSnapshot is later edited, the historical
   #     explanation remains frozen.
+  #   * v1 is never retired; old snapshots keep their current row bound to v1
+  #     even after v2 is published, because the strategy selector picks
+  #     effective_at <= snapshot_time.
   class PriorityComputer
+    CURRENT_KIND = "current"
+    REPLAY_KIND  = "replay"
+
     class << self
       def call(snapshot, strategy: nil, as_of: nil, now: Time.current)
         new(snapshot, strategy: strategy, as_of: as_of, now: now).call
@@ -33,6 +41,7 @@ module Scoring
 
     def call
       resolved_strategy = @strategy || select_strategy
+      kind = @strategy ? REPLAY_KIND : CURRENT_KIND
       result = Calculator.call(
         evidence_for(@snapshot),
         rules: resolved_strategy.rules,
@@ -40,7 +49,7 @@ module Scoring
         now: @now
       )
 
-      persist!(@snapshot, resolved_strategy, result)
+      persist!(@snapshot, resolved_strategy, result, kind)
     end
 
     private
@@ -60,7 +69,7 @@ module Scoring
       }
     end
 
-    def persist!(snapshot, strategy, result)
+    def persist!(snapshot, strategy, result, kind)
       attrs = {
         evidence_snapshot_id: snapshot.id,
         scoring_strategy_id: strategy.id,
@@ -71,19 +80,41 @@ module Scoring
         dispatch_status: result.dispatch_status,
         road_accessible: result.road_accessible,
         components: result.components,
-        explanation: build_explanation(snapshot, strategy, result)
+        explanation: build_explanation(snapshot, strategy, result, kind),
+        kind: kind
       }
 
-      row = PriorityScore.create_with(attrs).find_or_create_by!(
+      row = existing_row(snapshot, strategy)
+      return verify_and_return(row) if row
+
+      create_or_find_existing(attrs)
+    end
+
+    def existing_row(snapshot, strategy)
+      PriorityScore.find_by(
         evidence_snapshot_id: snapshot.id,
         scoring_strategy_id: strategy.id
       )
+    end
 
-      # If a pre-existing row was found (concurrent replay), verify its
-      # components still sum exactly to the total. This is an invariant guard
-      # so tampering / old data is detected rather than silently returned.
+    def verify_and_return(row)
       verify_component_sum!(row)
       row
+    end
+
+    def create_or_find_existing(attrs)
+      # Wrap the INSERT in a savepoint so that a unique-constraint failure
+      # from a concurrent caller does not abort the outer transaction. This
+      # is what makes the operation safe under rspec transactional fixtures
+      # as well as production transactions.
+      PriorityScore.transaction(requires_new: true) do
+        PriorityScore.create!(attrs).tap { |row| verify_component_sum!(row) }
+      end
+    rescue ActiveRecord::RecordNotUnique
+      PriorityScore.find_by!(
+        evidence_snapshot_id: attrs[:evidence_snapshot_id],
+        scoring_strategy_id: attrs[:scoring_strategy_id]
+      ).tap { |row| verify_component_sum!(row) }
     end
 
     def verify_component_sum!(row)
@@ -94,7 +125,7 @@ module Scoring
             "priority_score #{row.id} components sum to #{sum} but total is #{row.total_score}"
     end
 
-    def build_explanation(snapshot, strategy, result)
+    def build_explanation(snapshot, strategy, result, kind)
       {
         "version_code" => strategy.version_code,
         "strategy_id" => strategy.id,
@@ -102,6 +133,7 @@ module Scoring
         "effective_at" => strategy.effective_at.iso8601,
         "snapshot_time" => snapshot.snapshot_time.iso8601,
         "computed_at" => @now.iso8601,
+        "score_kind" => kind,
         "components" => result.components,
         "total_score" => result.total_score,
         "risk_level" => result.risk_level,

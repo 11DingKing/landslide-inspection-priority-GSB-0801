@@ -69,15 +69,19 @@ module Scoring
     private
 
     def build_relation
-      strategy_id = @strategy_id || current_strategy_id
-      PriorityScore
-        .joins("INNER JOIN (#{self.class.latest_snapshot_sql}) AS latest_snap
-                ON latest_snap.id = priority_scores.evidence_snapshot_id")
-        .where(priority_scores: { scoring_strategy_id: strategy_id })
-        .includes(:hazard_point, :evidence_snapshot, :scoring_strategy)
-        .order(Arel.sql("priority_scores.total_score DESC, priority_scores.hazard_point_id ASC"))
-        .yield_self { |s| apply_filters(s) }
-        .yield_self { |s| apply_pagination(s) }
+      scope = PriorityScore
+              .current
+              .joins("INNER JOIN (#{self.class.latest_snapshot_sql}) AS latest_snap
+                      ON latest_snap.id = priority_scores.evidence_snapshot_id")
+              .includes(:hazard_point, :evidence_snapshot, :scoring_strategy)
+              .order(Arel.sql("priority_scores.total_score DESC, priority_scores.hazard_point_id ASC"))
+
+      # When a strategy_id is given, restrict to replay view (scores produced
+      # by that strategy). By default the queue shows current scores, which are
+      # already bound to the strategy effective at each snapshot's time.
+      scope = scope.where(priority_scores: { scoring_strategy_id: @strategy_id }) if @strategy_id
+      scope.yield_self { |s| apply_filters(s) }
+           .yield_self { |s| apply_pagination(s) }
     end
 
     def apply_filters(scope)
@@ -111,10 +115,6 @@ module Scoring
       "SELECT DISTINCT ON (hazard_point_id) id " \
       "FROM evidence_snapshots " \
       "ORDER BY hazard_point_id, snapshot_time DESC, id DESC"
-    end
-
-    def current_strategy_id
-      @current_strategy_id ||= StrategySelector.for_time(Time.current).id
     end
 
     def clamp_page_size(value)

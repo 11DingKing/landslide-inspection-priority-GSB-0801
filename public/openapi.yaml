@@ -404,6 +404,13 @@ components:
         last_inspected_at: { type: string, format: date-time, nullable: true }
         road_accessible: { type: boolean }
         immutable: { type: boolean }
+        business_key:
+          type: string
+          nullable: true
+          description: |
+            Idempotency key. Same business_key + same payload returns the
+            existing snapshot (HTTP 200). Same business_key + different payload
+            returns HTTP 409 payload_conflict.
         raw_payload: { type: object }
         source_note: { type: string, nullable: true }
 
@@ -417,6 +424,12 @@ components:
         last_inspected_at: { type: string, format: date-time, nullable: true }
         road_accessible: { type: boolean }
         source_note: { type: string }
+        business_key:
+          type: string
+          description: |
+            Optional idempotency key. If a snapshot with this key already exists
+            and the payload matches, the existing record is returned (200); if
+            the payload differs, 409 is returned.
         raw_payload: { type: object }
 
     Component:
@@ -432,7 +445,7 @@ components:
 
     PriorityScore:
       type: object
-      required: [total_score, risk_level, dispatch_status, components, version_code]
+      required: [total_score, risk_level, dispatch_status, components, version_code, kind]
       properties:
         id: { type: integer }
         hazard_point_id: { type: integer }
@@ -444,6 +457,13 @@ components:
         risk_level: { type: string, enum: [low, medium, high, critical] }
         dispatch_status: { type: string, enum: [available, blocked] }
         road_accessible: { type: boolean }
+        kind:
+          type: string
+          enum: [current, replay]
+          description: |
+            "current" = score from the strategy effective at the snapshot's
+            time (one per snapshot, enforced by partial unique index).
+            "replay" = score from an explicitly requested strategy version.
         components:
           type: array
           items: { $ref: "#/components/schemas/Component" }

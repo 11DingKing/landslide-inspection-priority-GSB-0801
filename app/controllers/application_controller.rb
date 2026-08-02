@@ -1,9 +1,11 @@
 class ApplicationController < ActionController::API
   rescue_from ActiveRecord::RecordNotFound, with: :not_found
   rescue_from ActiveRecord::RecordInvalid, with: :unprocessable
+  rescue_from ActiveRecord::RecordNotUnique, with: :conflict
   rescue_from Scoring::StrategySelector::NoStrategyError, with: :no_strategy
-  rescue_from ScoringStrategy::StrategyOverlapError, with: :conflict
+  rescue_from ScoringStrategy::StrategyOverlapError, with: :strategy_overlap
   rescue_from Scoring::PriorityComputer::ComponentSumMismatch, with: :server_error
+  rescue_from Scoring::SnapshotUpserter::PayloadConflict, with: :payload_conflict
 
   private
 
@@ -23,8 +25,22 @@ class ApplicationController < ActionController::API
            status: :service_unavailable
   end
 
-  def conflict(e)
+  def strategy_overlap(e)
     render json: { error: "strategy_overlap", message: e.message },
+           status: :conflict
+  end
+
+  def payload_conflict(e)
+    render json: {
+      error: "payload_conflict",
+      message: e.message,
+      existing_snapshot_id: e.existing.id,
+      business_key: e.existing.business_key
+    }, status: :conflict
+  end
+
+  def conflict(e)
+    render json: { error: "conflict", message: e.message },
            status: :conflict
   end
 

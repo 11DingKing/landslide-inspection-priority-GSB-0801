@@ -14,8 +14,9 @@ class EvidenceSnapshotsController < ApplicationController
   end
 
   def create
-    snapshot = @hazard_point.evidence_snapshots.create!(snapshot_params)
-    render json: snapshot, status: :created
+    result = Scoring::SnapshotUpserter.call(@hazard_point, snapshot_params)
+    status = result.created? ? :created : :ok
+    render json: result.snapshot, status: status
   end
 
   def lock
@@ -36,7 +37,7 @@ class EvidenceSnapshotsController < ApplicationController
   def snapshot_params
     params.require(:evidence_snapshot).permit(
       :snapshot_time, :rainfall_24h_mm, :historical_event_count,
-      :last_inspected_at, :road_accessible, :source_note,
+      :last_inspected_at, :road_accessible, :source_note, :business_key,
       raw_payload: {}
     )
   end
