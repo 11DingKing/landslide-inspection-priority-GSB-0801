@@ -1,0 +1,23 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  host: <%= ENV.fetch("DB_HOST") { "localhost" } %>
+  port: <%= ENV.fetch("DB_PORT") { 5432 } %>
+  username: <%= ENV.fetch("DB_USERNAME") { "" } %>
+  password: <%= ENV.fetch("DB_PASSWORD") { "" } %>
+
+development:
+  <<: *default
+  database: landslide_priority_development
+
+test:
+  <<: *default
+  database: landslide_priority_test
+  pool: 20
+
+production:
+  <<: *default
+  database: landslide_priority_production
+  username: landslide_priority
+  password: <%= ENV["LANDSLIDE_PRIORITY_DATABASE_PASSWORD"] %>
