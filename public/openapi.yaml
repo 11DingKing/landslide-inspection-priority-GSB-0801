@@ -1,0 +1,713 @@
+openapi: 3.1.0
+info:
+  title: Landslide Inspection Priority API
+  version: "1.0.0"
+  description: |
+    Explainable post-rainfall landslide inspection priority service.
+
+    Key properties:
+      * Scoring rules live in a pure-Ruby domain layer (Scoring::Calculator);
+        controllers and ActiveRecord callbacks contain zero scoring logic.
+      * Evidence snapshots are immutable once locked; component names, score
+        ranges and snapshot times are frozen inside each PriorityScore row.
+      * Scoring strategies are versioned. Exactly one published strategy is
+        effective at any point in time (enforced by a partial unique index).
+      * Component scores always sum to total_score (invariant verified on
+        read in the explain endpoint and on write in PriorityComputer).
+      * Road inaccessibility only changes dispatch_status to "blocked"; it
+        never lowers total_score or risk_level.
+      * Queue ordering is deterministic: total_score DESC, hazard_point_id ASC,
+        so equal-score pages are stable under continuous writes.
+
+servers:
+  - url: http://localhost:3000
+    description: local development
+
+paths:
+  /up:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: Service is up }
+
+  /hazard_points:
+    get:
+      summary: List hazard points
+      responses:
+        "200":
+          description: Array of hazard points
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HazardPoint" }
+    post:
+      summary: Create a hazard point
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HazardPointInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+
+  /hazard_points/{id}:
+    get:
+      summary: Get one hazard point
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: A hazard point
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: Update a hazard point
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HazardPointInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+
+  /hazard_points/{hazard_point_id}/evidence_snapshots:
+    get:
+      summary: List evidence snapshots for a hazard point
+      parameters:
+        - $ref: "#/components/parameters/HazardPointId"
+      responses:
+        "200":
+          description: Array of snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/EvidenceSnapshot" }
+    post:
+      summary: Create an evidence snapshot
+      parameters:
+        - $ref: "#/components/parameters/HazardPointId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EvidenceSnapshotInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+
+  /hazard_points/{hazard_point_id}/evidence_snapshots/{id}:
+    get:
+      summary: Get one evidence snapshot
+      parameters:
+        - $ref: "#/components/parameters/HazardPointId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+
+  /hazard_points/{hazard_point_id}/evidence_snapshots/{id}/lock:
+    post:
+      summary: Freeze an evidence snapshot (immutable thereafter)
+      parameters:
+        - $ref: "#/components/parameters/HazardPointId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Locked snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+
+  /hazard_points/{hazard_point_id}/evidence_snapshots/{id}/priority:
+    post:
+      summary: Compute (or look up) the priority score for a snapshot
+      description: |
+        If the same (snapshot, strategy) pair has already been computed the
+        existing PriorityScore is returned (idempotent / concurrency-safe).
+        The snapshot is locked automatically after scoring.
+      parameters:
+        - $ref: "#/components/parameters/HazardPointId"
+        - $ref: "#/components/parameters/Id"
+        - name: strategy_id
+          in: query
+          schema: { type: integer }
+          description: Replay with a specific strategy version. Omit to use the strategy effective at snapshot_time.
+        - name: as_of
+          in: query
+          schema: { type: string, format: date-time }
+          description: Override the "as-of" time used for strategy selection.
+      responses:
+        "201":
+          description: Score
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriorityScore" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /strategies:
+    get:
+      summary: List scoring strategies
+      responses:
+        "200":
+          description: Strategies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Strategy" }
+    post:
+      summary: Create a draft strategy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StrategyInput" }
+      responses:
+        "201":
+          description: Draft created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+
+  /strategies/{id}:
+    get:
+      summary: Get one strategy
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Strategy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+
+  /strategies/{id}/publish:
+    post:
+      summary: Publish a strategy
+      description: |
+        Sets status=published and published_at=now. Fails with HTTP 409 if
+        another published strategy already has the same effective_at.
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /strategies/{id}/retire:
+    post:
+      summary: Retire a strategy
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Retired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+
+  /priority/queue:
+    get:
+      summary: Retrieve the current inspection queue
+      description: |
+        For each hazard point, uses the most recent evidence snapshot and the
+        current published strategy. Orders by total_score DESC, hazard_point_id ASC.
+        Supports offset and cursor pagination. Blocked points are included by
+        default but can be filtered.
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: per_page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque cursor returned from the previous response.
+        - name: include_blocked
+          in: query
+          schema: { type: boolean, default: true }
+          description: When false, only dispatch_status=available rows are returned.
+        - name: dispatch_status
+          in: query
+          schema: { type: string, enum: [available, blocked] }
+        - name: risk_level
+          in: query
+          schema: { type: string, enum: [low, medium, high, critical] }
+        - name: strategy_id
+          in: query
+          schema: { type: integer }
+          description: "Replay view: restrict the queue to scores computed by this strategy."
+      responses:
+        "200":
+          description: A page of the queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueuePage" }
+
+  /priority/replay:
+    post:
+      summary: Replay a batch of snapshots against a specific strategy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy_id, snapshot_ids]
+              properties:
+                strategy_id: { type: integer }
+                snapshot_ids:
+                  type: array
+                  items: { type: integer }
+      responses:
+        "200":
+          description: Replayed scores
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PriorityScore" }
+
+  /priority/compute_latest:
+    post:
+      summary: Compute scores for the latest snapshot of every hazard point
+      parameters:
+        - name: hazard_point_ids
+          in: query
+          schema:
+            type: array
+            items: { type: integer }
+      responses:
+        "200":
+          description: Number of rows computed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  computed: { type: integer }
+
+  /priority/{id}/explain:
+    get:
+      summary: Explain a priority score
+      description: |
+        Returns the frozen component breakdown, rule version and snapshot
+        time. Verifies that components sum to total_score; the field
+        sum_matches_total is true iff the invariant holds.
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Explanation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Explanation" }
+
+  /queue_snapshots:
+    get:
+      summary: List named queue read snapshots
+      responses:
+        "200":
+          description: Array of queue snapshots (most recent first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/QueueSnapshot" }
+    post:
+      summary: Create a frozen queue read snapshot
+      description: |
+        Materializes the current ordered priority queue into an immutable,
+        named snapshot bound to one scoring strategy ("round"). The frozen
+        item list is unaffected by subsequent evidence writes or score
+        recomputations, so a cursor traversal never skips or repeats rows.
+        Only a newly created snapshot sees later updates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueueSnapshotInput" }
+      responses:
+        "201":
+          description: Snapshot created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /queue_snapshots/{id}:
+    get:
+      summary: Get one queue snapshot (metadata only)
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /queue_snapshots/{id}/items:
+    get:
+      summary: Page through a frozen queue snapshot
+      description: |
+        Returns one page of the immutable snapshot using an opaque position
+        cursor. Pass next_cursor from each response to fetch the next page.
+        Because the item list is frozen at snapshot creation time, mid-walk
+        writes to current scores cannot cause misses or duplicates.
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque cursor returned by the previous page. Omit for the first page.
+        - name: per_page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: A page of the frozen snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshotPage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    HazardPointId:
+      name: hazard_point_id
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflict (e.g. overlapping strategy)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+        details: { type: object, additionalProperties: true }
+
+    HazardPoint:
+      type: object
+      properties:
+        id: { type: integer }
+        kind:
+          {
+            type: string,
+            enum: [cut_slope_building, road_slope, registered_hazard],
+          }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        external_code: { type: string, nullable: true }
+        road_accessible: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    HazardPointInput:
+      type: object
+      required: [kind, name]
+      properties:
+        kind:
+          {
+            type: string,
+            enum: [cut_slope_building, road_slope, registered_hazard],
+          }
+        name: { type: string }
+        description: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        external_code: { type: string }
+        road_accessible: { type: boolean }
+
+    EvidenceSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        hazard_point_id: { type: integer }
+        snapshot_time: { type: string, format: date-time }
+        rainfall_24h_mm: { type: number }
+        historical_event_count: { type: integer }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+        road_accessible: { type: boolean }
+        immutable: { type: boolean }
+        business_key:
+          type: string
+          nullable: true
+          description: |
+            Idempotency key. Same business_key + same payload returns the
+            existing snapshot (HTTP 200). Same business_key + different payload
+            returns HTTP 409 payload_conflict.
+        raw_payload: { type: object }
+        source_note: { type: string, nullable: true }
+
+    EvidenceSnapshotInput:
+      type: object
+      required: [snapshot_time, rainfall_24h_mm]
+      properties:
+        snapshot_time: { type: string, format: date-time }
+        rainfall_24h_mm: { type: number }
+        historical_event_count: { type: integer, default: 0 }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+        road_accessible: { type: boolean }
+        source_note: { type: string }
+        business_key:
+          type: string
+          description: |
+            Optional idempotency key. If a snapshot with this key already exists
+            and the payload matches, the existing record is returned (200); if
+            the payload differs, 409 is returned.
+        raw_payload: { type: object }
+
+    Component:
+      type: object
+      required: [name, score, max_score, reason]
+      properties:
+        name:
+          type: string
+          enum:
+            [
+              rainfall_24h,
+              historical_events,
+              inspection_recency,
+              point_type_weight,
+            ]
+        score: { type: integer, minimum: 0 }
+        max_score: { type: integer, minimum: 0 }
+        reason: { type: string }
+
+    PriorityScore:
+      type: object
+      required:
+        [
+          total_score,
+          risk_level,
+          dispatch_status,
+          components,
+          version_code,
+          kind,
+        ]
+      properties:
+        id: { type: integer }
+        hazard_point_id: { type: integer }
+        evidence_snapshot_id: { type: integer }
+        scoring_strategy_id: { type: integer }
+        version_code: { type: string }
+        snapshot_time: { type: string, format: date-time }
+        total_score: { type: integer, minimum: 0, maximum: 100 }
+        risk_level: { type: string, enum: [low, medium, high, critical] }
+        dispatch_status: { type: string, enum: [available, blocked] }
+        road_accessible: { type: boolean }
+        kind:
+          type: string
+          enum: [current, replay]
+          description: |
+            "current" = score from the strategy effective at the snapshot's
+            time (one per snapshot, enforced by partial unique index).
+            "replay" = score from an explicitly requested strategy version.
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/Component" }
+        hazard_point:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            kind: { type: string }
+
+    QueuePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PriorityScore" }
+        total: { type: integer }
+        per_page: { type: integer }
+        offset: { type: integer }
+        next_cursor: { type: string, nullable: true }
+        has_more: { type: boolean }
+
+    Explanation:
+      type: object
+      properties:
+        priority_score_id: { type: integer }
+        hazard_point_id: { type: integer }
+        evidence_snapshot_id: { type: integer }
+        strategy_id: { type: integer }
+        version_code: { type: string }
+        strategy_name: { type: string }
+        effective_at: { type: string, format: date-time }
+        snapshot_time: { type: string, format: date-time }
+        computed_at: { type: string, format: date-time }
+        total_score: { type: integer }
+        component_sum: { type: integer }
+        sum_matches_total: { type: boolean }
+        risk_level: { type: string }
+        dispatch_status: { type: string }
+        road_accessible: { type: boolean }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/Component" }
+        notes: { type: string }
+
+    Strategy:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        version_code: { type: string }
+        status: { type: string, enum: [draft, published, retired] }
+        effective_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time, nullable: true }
+        rules_json: { type: object, additionalProperties: true }
+        change_note: { type: string, nullable: true }
+
+    StrategyInput:
+      type: object
+      required: [name, version_code, effective_at, rules_json]
+      properties:
+        name: { type: string }
+        version_code: { type: string }
+        effective_at: { type: string, format: date-time }
+        rules_json: { type: object, additionalProperties: true }
+        change_note: { type: string }
+
+    QueueSnapshot:
+      type: object
+      description: |
+        An immutable, named read snapshot of the inspection queue. It is bound
+        to a single scoring strategy ("round") at creation time and freezes the
+        ordered list of priority_score IDs, so a cursor traversal is unaffected
+        by later evidence writes or score recomputations.
+      properties:
+        id: { type: integer }
+        name:
+          type: string
+          description: Unique, human-readable name, e.g. "queue-20260802-01".
+        scoring_strategy_id: { type: integer }
+        version_code: { type: string }
+        snapshot_at: { type: string, format: date-time }
+        total_count: { type: integer }
+        include_blocked: { type: boolean }
+        filters: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+
+    QueueSnapshotInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        strategy_id:
+          type: integer
+          description: |
+            Bind the snapshot to an explicit strategy. Defaults to the
+            strategy effective at snapshot_at.
+        snapshot_at:
+          type: string
+          format: date-time
+          description: |
+            The as-of time used to select the effective strategy (and which
+            current scores are materialized). Defaults to the current time.
+        include_blocked: { type: boolean, default: true }
+        risk_level:
+          type: string
+          enum: [low, medium, high, critical]
+        dispatch_status:
+          type: string
+          enum: [available, blocked]
+
+    QueueSnapshotItem:
+      type: object
+      properties:
+        position: { type: integer }
+        priority_score_id: { type: integer }
+        hazard_point_id: { type: integer }
+        total_score: { type: integer }
+        risk_level: { type: string, enum: [low, medium, high, critical] }
+        dispatch_status: { type: string, enum: [available, blocked] }
+        version_code: { type: string }
+        snapshot_time: { type: string, format: date-time }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/Component" }
+        hazard_point:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            kind: { type: string }
+            external_code: { type: string, nullable: true }
+
+    QueueSnapshotPage:
+      type: object
+      properties:
+        snapshot:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            snapshot_at: { type: string, format: date-time }
+            strategy_id: { type: integer }
+            version_code: { type: string }
+            total_count: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/QueueSnapshotItem" }
+        total: { type: integer }
+        per_page: { type: integer }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque position token for the next page; null when finished.
+        has_more: { type: boolean }
