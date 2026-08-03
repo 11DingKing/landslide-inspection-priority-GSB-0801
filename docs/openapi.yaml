@@ -1,0 +1,522 @@
+openapi: 3.0.3
+info:
+  title: Landslide Inspection Priority Service
+  version: "1.0.0"
+  description: |
+    Explainable prioritisation service for geological-hazard inspection after
+    sustained heavy rainfall. Manages hazard points, immutable evidence
+    snapshots and versioned scoring policies, and exposes priority computation,
+    a stable inspection queue, and per-component explanations.
+
+    Invariants guaranteed by the service:
+      * Component scores use a LOCKED vocabulary and range:
+        rainfall (0..40), history (0..25), recency (0..20), exposure (0..15).
+      * total_score is the exact integer sum of the four components (0..100).
+      * An impassable road sets scheduling_status="blocked" ONLY; it never
+        lowers total_score or risk_level.
+      * Policies are valid over a half-open interval [effective_from,
+        effective_until). Published intervals may never overlap (DB GiST
+        exclusion constraint), so a snapshot resolves to a single authoritative
+        version. A policy can be BOUNDED (given an end) rather than retired, so
+        earlier snapshots still resolve to it and remain replayable.
+      * Evidence snapshots are immutable and can be replayed by any policy. An
+        optional business_key makes capture idempotent for an identical payload
+        and a conflict (409) for a divergent payload.
+      * At most one priority score per hazard point is `current`; concurrent
+        computation converges to a single current row.
+servers:
+  - url: http://localhost:3000
+paths:
+  /api/v1/hazard_points:
+    get:
+      summary: List hazard points
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/HazardPoint" }
+    post:
+      summary: Create a hazard point
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hazard_point:
+                  $ref: "#/components/schemas/HazardPointInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/hazard_points/{id}:
+    get:
+      summary: Show a hazard point
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HazardPoint" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/hazard_points/{hazard_point_id}/evidence_snapshots:
+    get:
+      summary: List snapshots for a hazard point
+      parameters:
+        - { name: hazard_point_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/EvidenceSnapshot" }
+    post:
+      summary: Capture an immutable evidence snapshot
+      parameters:
+        - { name: hazard_point_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                evidence_snapshot:
+                  $ref: "#/components/schemas/EvidenceSnapshotInput"
+      responses:
+        "201":
+          description: |
+            Created, or the existing snapshot when the same business_key is
+            re-submitted with an identical payload (idempotent). Snapshots are
+            immutable; no update/delete endpoints exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "409":
+          description: business_key already exists with a different payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BusinessKeyError" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/evidence_snapshots/{id}:
+    get:
+      summary: Show an evidence snapshot
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/evidence_snapshots/{evidence_snapshot_id}/priority:
+    post:
+      summary: Compute (materialise) a priority score for a snapshot
+      description: |
+        Scores the immutable snapshot. If scoring_policy_id is supplied, that
+        exact policy version is replayed; otherwise the authoritative policy for
+        the snapshot's captured_at is used. Idempotent per (snapshot, policy):
+        concurrent calls converge to one row.
+      parameters:
+        - { name: evidence_snapshot_id, in: path, required: true, schema: { type: integer } }
+        - name: scoring_policy_id
+          in: query
+          required: false
+          schema: { type: integer }
+          description: Replay against a specific policy version.
+      responses:
+        "201":
+          description: Score materialised
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Explanation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: No authoritative policy for the snapshot instant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/scoring_policies:
+    get:
+      summary: List scoring policies
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScoringPolicy" }
+    post:
+      summary: Create a draft scoring policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scoring_policy:
+                  $ref: "#/components/schemas/ScoringPolicyInput"
+      responses:
+        "201":
+          description: Created (status=draft)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringPolicy" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/scoring_policies/{id}:
+    get:
+      summary: Show a scoring policy
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringPolicy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/scoring_policies/{id}/publish:
+    post:
+      summary: Publish a scoring policy
+      description: |
+        Publishing enforces the interval-overlap rule at the database level (a
+        GiST exclusion constraint): if the policy's [effective_from,
+        effective_until) window overlaps an already-published policy, this
+        returns 409 overlapping_policy. This is how concurrent publication of two
+        candidates over the same window is rejected, leaving a single
+        authoritative version.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringPolicy" }
+        "409":
+          description: Overlapping published policy interval
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverlapError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/scoring_policies/{id}/bound:
+    patch:
+      summary: Bound a published policy's interval (set effective_until)
+      description: |
+        Closes an already-published policy's validity interval at a boundary
+        WITHOUT retiring it. The policy stays published and still scores /
+        reproduces any snapshot captured before the boundary, so a successor
+        policy can take over from the boundary onward while historical replay
+        remains intact. A boundary that would recreate an overlap returns 409.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scoring_policy:
+                  type: object
+                  required: [effective_until]
+                  properties:
+                    effective_until: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Bounded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoringPolicy" }
+        "409":
+          description: Boundary would overlap another published policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverlapError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/scoring_policies/{scoring_policy_id}/queue:
+    get:
+      summary: Stable, keyset-paginated inspection queue for a policy
+      description: |
+        Ordered by total_score DESC then hazard_point_id ASC. Because the
+        tiebreak key is immutable, pages never reshuffle even while equal-scored
+        rows are being written continuously.
+      parameters:
+        - { name: scoring_policy_id, in: path, required: true, schema: { type: integer } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, maximum: 1000 } }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque cursor "<total_score>:<hazard_point_id>" from a prior page.
+        - name: scheduling_status
+          in: query
+          required: false
+          schema: { type: string, enum: [schedulable, blocked] }
+        - name: current
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: When true, only the current score per hazard point is returned.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueuePage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/priority_scores/{id}/explanation:
+    get:
+      summary: Explain a materialised priority score
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Explanation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/scoring_policies/{scoring_policy_id}/queue_snapshots:
+    post:
+      summary: Build a named, frozen queue-read snapshot pinned to a policy
+      description: |
+        Freezes the pinned policy's current ranking into an immutable, named
+        snapshot (e.g. "queue-20260802-01"). A traversal of this snapshot is
+        stable: it reads only the frozen items, so concurrent recomputes that
+        move `current` scores never cause missed or duplicated rows. To observe
+        updates, build a NEW snapshot.
+      parameters:
+        - { name: scoring_policy_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/queue_snapshots/{id}:
+    get:
+      summary: Show a queue-read snapshot (id may be numeric id or the name)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/queue_snapshots/{id}/page:
+    get:
+      summary: Paginate a queue-read snapshot's frozen items (stable keyset)
+      description: |
+        Walks the frozen items ordered by total_score DESC then hazard_point_id
+        ASC. Resuming the original cursor after concurrent recomputes returns the
+        remaining frozen items with no misses and no duplicates.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, maximum: 1000 } }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque cursor "<total_score>:<hazard_point_id>" from a prior page.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FrozenQueuePage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    HazardPointInput:
+      type: object
+      required: [code, name, category]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        category: { type: string, enum: [cut_slope_housing, road_slope, registered_hazard] }
+        latitude: { type: string, nullable: true }
+        longitude: { type: string, nullable: true }
+        last_inspected_at: { type: string, format: date-time, nullable: true }
+    HazardPoint:
+      allOf:
+        - { $ref: "#/components/schemas/HazardPointInput" }
+        - type: object
+          properties:
+            id: { type: integer }
+    EvidenceSnapshotInput:
+      type: object
+      required: [captured_at, rainfall_mm_24h, historical_event_count, road_accessible]
+      properties:
+        business_key:
+          type: string
+          nullable: true
+          description: |
+            Optional stable identifier. Same key + same payload is idempotent;
+            same key + different payload is a 409 conflict.
+        captured_at: { type: string, format: date-time, description: "LOCKED evidence instant" }
+        rainfall_mm_24h: { type: number }
+        historical_event_count: { type: integer }
+        road_accessible: { type: boolean }
+        point_last_inspected_at: { type: string, format: date-time, nullable: true }
+    EvidenceSnapshot:
+      allOf:
+        - { $ref: "#/components/schemas/EvidenceSnapshotInput" }
+        - type: object
+          properties:
+            id: { type: integer }
+            hazard_point_id: { type: integer }
+            content_digest: { type: string, description: "SHA256 of frozen facts" }
+    ScoringPolicyInput:
+      type: object
+      required: [version, effective_from, definition]
+      properties:
+        version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: End of the half-open validity interval; null = open-ended.
+        definition:
+          type: object
+          description: Declarative weights/thresholds consumed only by the scoring engine.
+    ScoringPolicy:
+      allOf:
+        - { $ref: "#/components/schemas/ScoringPolicyInput" }
+        - type: object
+          properties:
+            id: { type: integer }
+            status: { type: string, enum: [draft, published, archived] }
+            published_at: { type: string, format: date-time, nullable: true }
+    Component:
+      type: object
+      properties:
+        name: { type: string, enum: [rainfall, history, recency, exposure] }
+        score: { type: integer }
+        max: { type: integer }
+    Explanation:
+      type: object
+      properties:
+        hazard_point: { type: object }
+        evidence_snapshot: { type: object }
+        scoring_policy:
+          type: object
+          properties:
+            id: { type: integer }
+            version: { type: string }
+            effective_from: { type: string, format: date-time }
+            effective_until: { type: string, format: date-time, nullable: true }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/Component" }
+        total_score: { type: integer, description: "Exact sum of components (0..100)" }
+        components_sum: { type: integer, description: "Always equals total_score" }
+        risk_level: { type: string, enum: [low, moderate, high, extreme] }
+        scheduling_status: { type: string, enum: [schedulable, blocked] }
+        road_blocked: { type: boolean }
+        current: { type: boolean, description: "True if the authoritative score for its hazard point" }
+    QueueItem:
+      type: object
+      properties:
+        hazard_point_id: { type: integer }
+        hazard_point_code: { type: string }
+        total_score: { type: integer }
+        risk_level: { type: string }
+        scheduling_status: { type: string }
+        policy_version: { type: string }
+        evidence_snapshot_id: { type: integer }
+        current: { type: boolean }
+    QueuePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/QueueItem" }
+        next_cursor: { type: string, nullable: true }
+    QueueSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        scoring_policy_id: { type: integer }
+        policy_version: { type: string }
+        built_at: { type: string, format: date-time }
+        item_count: { type: integer }
+    FrozenQueueItem:
+      type: object
+      properties:
+        hazard_point_id: { type: integer }
+        hazard_point_code: { type: string }
+        total_score: { type: integer }
+        risk_level: { type: string }
+        scheduling_status: { type: string }
+        policy_version: { type: string }
+        evidence_snapshot_id: { type: integer }
+        priority_score_id:
+          type: integer
+          description: The score this frozen item points at; use it to fetch the explanation.
+    FrozenQueuePage:
+      type: object
+      properties:
+        queue_snapshot: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/FrozenQueueItem" }
+        next_cursor: { type: string, nullable: true }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+    OverlapError:
+      allOf:
+        - { $ref: "#/components/schemas/Error" }
+        - type: object
+          properties:
+            effective_from: { type: string, format: date-time }
+            effective_until: { type: string, format: date-time, nullable: true }
+    BusinessKeyError:
+      allOf:
+        - { $ref: "#/components/schemas/Error" }
+        - type: object
+          properties:
+            business_key: { type: string }
