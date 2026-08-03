@@ -21,4 +21,10 @@ Rails.application.routes.draw do
   post "priority/replay",         to: "priorities#replay"
   post "priority/compute_latest", to: "priorities#compute_latest"
   get  "priority/:id/explain",    to: "priorities#explain", as: :priority_explain
+
+  resources :queue_snapshots, only: %i[index show create] do
+    member do
+      get :items
+    end
+  end
 end

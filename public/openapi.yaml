@@ -264,7 +264,7 @@ paths:
         - name: strategy_id
           in: query
           schema: { type: integer }
-          description: Replay view: restrict the queue to scores computed by this strategy.
+          description: "Replay view: restrict the queue to scores computed by this strategy."
       responses:
         "200":
           description: A page of the queue
@@ -334,6 +334,76 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Explanation" }
 
+  /queue_snapshots:
+    get:
+      summary: List named queue read snapshots
+      responses:
+        "200":
+          description: Array of queue snapshots (most recent first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/QueueSnapshot" }
+    post:
+      summary: Create a frozen queue read snapshot
+      description: |
+        Materializes the current ordered priority queue into an immutable,
+        named snapshot bound to one scoring strategy ("round"). The frozen
+        item list is unaffected by subsequent evidence writes or score
+        recomputations, so a cursor traversal never skips or repeats rows.
+        Only a newly created snapshot sees later updates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueueSnapshotInput" }
+      responses:
+        "201":
+          description: Snapshot created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /queue_snapshots/{id}:
+    get:
+      summary: Get one queue snapshot (metadata only)
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /queue_snapshots/{id}/items:
+    get:
+      summary: Page through a frozen queue snapshot
+      description: |
+        Returns one page of the immutable snapshot using an opaque position
+        cursor. Pass next_cursor from each response to fetch the next page.
+        Because the item list is frozen at snapshot creation time, mid-walk
+        writes to current scores cannot cause misses or duplicates.
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque cursor returned by the previous page. Omit for the first page.
+        - name: per_page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: A page of the frozen snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueSnapshotPage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   parameters:
     Id:
@@ -371,7 +441,11 @@ components:
       type: object
       properties:
         id: { type: integer }
-        kind: { type: string, enum: [cut_slope_building, road_slope, registered_hazard] }
+        kind:
+          {
+            type: string,
+            enum: [cut_slope_building, road_slope, registered_hazard],
+          }
         name: { type: string }
         description: { type: string, nullable: true }
         latitude: { type: number, nullable: true }
@@ -385,7 +459,11 @@ components:
       type: object
       required: [kind, name]
       properties:
-        kind: { type: string, enum: [cut_slope_building, road_slope, registered_hazard] }
+        kind:
+          {
+            type: string,
+            enum: [cut_slope_building, road_slope, registered_hazard],
+          }
         name: { type: string }
         description: { type: string }
         latitude: { type: number }
@@ -438,14 +516,28 @@ components:
       properties:
         name:
           type: string
-          enum: [rainfall_24h, historical_events, inspection_recency, point_type_weight]
+          enum:
+            [
+              rainfall_24h,
+              historical_events,
+              inspection_recency,
+              point_type_weight,
+            ]
         score: { type: integer, minimum: 0 }
         max_score: { type: integer, minimum: 0 }
         reason: { type: string }
 
     PriorityScore:
       type: object
-      required: [total_score, risk_level, dispatch_status, components, version_code, kind]
+      required:
+        [
+          total_score,
+          risk_level,
+          dispatch_status,
+          components,
+          version_code,
+          kind,
+        ]
       properties:
         id: { type: integer }
         hazard_point_id: { type: integer }
@@ -530,3 +622,92 @@ components:
         effective_at: { type: string, format: date-time }
         rules_json: { type: object, additionalProperties: true }
         change_note: { type: string }
+
+    QueueSnapshot:
+      type: object
+      description: |
+        An immutable, named read snapshot of the inspection queue. It is bound
+        to a single scoring strategy ("round") at creation time and freezes the
+        ordered list of priority_score IDs, so a cursor traversal is unaffected
+        by later evidence writes or score recomputations.
+      properties:
+        id: { type: integer }
+        name:
+          type: string
+          description: Unique, human-readable name, e.g. "queue-20260802-01".
+        scoring_strategy_id: { type: integer }
+        version_code: { type: string }
+        snapshot_at: { type: string, format: date-time }
+        total_count: { type: integer }
+        include_blocked: { type: boolean }
+        filters: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+
+    QueueSnapshotInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        strategy_id:
+          type: integer
+          description: |
+            Bind the snapshot to an explicit strategy. Defaults to the
+            strategy effective at snapshot_at.
+        snapshot_at:
+          type: string
+          format: date-time
+          description: |
+            The as-of time used to select the effective strategy (and which
+            current scores are materialized). Defaults to the current time.
+        include_blocked: { type: boolean, default: true }
+        risk_level:
+          type: string
+          enum: [low, medium, high, critical]
+        dispatch_status:
+          type: string
+          enum: [available, blocked]
+
+    QueueSnapshotItem:
+      type: object
+      properties:
+        position: { type: integer }
+        priority_score_id: { type: integer }
+        hazard_point_id: { type: integer }
+        total_score: { type: integer }
+        risk_level: { type: string, enum: [low, medium, high, critical] }
+        dispatch_status: { type: string, enum: [available, blocked] }
+        version_code: { type: string }
+        snapshot_time: { type: string, format: date-time }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/Component" }
+        hazard_point:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            kind: { type: string }
+            external_code: { type: string, nullable: true }
+
+    QueueSnapshotPage:
+      type: object
+      properties:
+        snapshot:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            snapshot_at: { type: string, format: date-time }
+            strategy_id: { type: integer }
+            version_code: { type: string }
+            total_count: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/QueueSnapshotItem" }
+        total: { type: integer }
+        per_page: { type: integer }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque position token for the next page; null when finished.
+        has_more: { type: boolean }

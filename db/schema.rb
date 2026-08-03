@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_02_231236) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_03_040000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -79,6 +79,39 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_231236) do
     t.index ["total_score", "hazard_point_id"], name: "idx_priority_scores_queue_order"
   end
 
+  create_table "queue_snapshot_items", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "dispatch_status", null: false
+    t.bigint "hazard_point_id", null: false
+    t.integer "position", null: false
+    t.bigint "priority_score_id", null: false
+    t.bigint "queue_snapshot_id", null: false
+    t.string "risk_level", null: false
+    t.integer "total_score", null: false
+    t.datetime "updated_at", null: false
+    t.index ["hazard_point_id"], name: "index_queue_snapshot_items_on_hazard_point_id"
+    t.index ["priority_score_id"], name: "index_queue_snapshot_items_on_priority_score_id"
+    t.index ["queue_snapshot_id", "position"], name: "idx_queue_items_snapshot_position", unique: true
+    t.index ["queue_snapshot_id", "priority_score_id"], name: "idx_queue_items_snapshot_score", unique: true
+    t.index ["queue_snapshot_id"], name: "index_queue_snapshot_items_on_queue_snapshot_id"
+  end
+
+  create_table "queue_snapshots", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "dispatch_status_filter"
+    t.jsonb "filters_json", default: {}, null: false
+    t.boolean "include_blocked", default: true, null: false
+    t.string "name", null: false
+    t.string "risk_level_filter"
+    t.bigint "scoring_strategy_id", null: false
+    t.datetime "snapshot_at", precision: nil, null: false
+    t.integer "total_count", default: 0, null: false
+    t.datetime "updated_at", null: false
+    t.index ["name"], name: "index_queue_snapshots_on_name", unique: true
+    t.index ["scoring_strategy_id"], name: "index_queue_snapshots_on_scoring_strategy_id"
+    t.index ["snapshot_at"], name: "index_queue_snapshots_on_snapshot_at"
+  end
+
   create_table "scoring_strategies", force: :cascade do |t|
     t.text "change_note"
     t.datetime "created_at", null: false
@@ -98,4 +131,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_231236) do
   add_foreign_key "priority_scores", "evidence_snapshots", on_delete: :restrict
   add_foreign_key "priority_scores", "hazard_points", on_delete: :cascade
   add_foreign_key "priority_scores", "scoring_strategies", on_delete: :restrict
+  add_foreign_key "queue_snapshot_items", "hazard_points", on_delete: :cascade
+  add_foreign_key "queue_snapshot_items", "priority_scores", on_delete: :restrict
+  add_foreign_key "queue_snapshot_items", "queue_snapshots", on_delete: :cascade
+  add_foreign_key "queue_snapshots", "scoring_strategies", on_delete: :restrict
 end
